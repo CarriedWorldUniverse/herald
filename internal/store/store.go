@@ -1,0 +1,93 @@
+// Package store is herald's identity persistence: orgs, users (human|agent,
+// one type with a kind discriminator), and scope grants. See the MVP spec §3.
+//
+// The Store interface is the seam; SQLite is the MVP implementation. Domain
+// logic (create-agent validation, block cascade, fingerprinting) lives one
+// layer up in internal/identity — the store is a thin typed CRUD surface.
+package store
+
+import (
+	"context"
+	"errors"
+)
+
+// Kind discriminates the two user kinds. Same record, different auth method:
+// humans log in (login_secret); agents present a casket-signed JWT (casket_pubkey).
+type Kind string
+
+const (
+	KindHuman Kind = "human"
+	KindAgent Kind = "agent"
+)
+
+// Status is the active/blocked lifecycle flag on orgs and users.
+type Status string
+
+const (
+	StatusActive  Status = "active"
+	StatusBlocked Status = "blocked"
+)
+
+// ErrNotFound is returned by Get* when no row matches.
+var ErrNotFound = errors.New("store: not found")
+
+// Org is a tenant + accountability root. Flat for MVP (no manager tree).
+type Org struct {
+	ID        string
+	Name      string
+	Status    Status
+	CreatedAt string
+}
+
+// User is a human or an agent. The fields used depend on Kind:
+//   - human: LoginSecret set; Casket* and ResponsibleHuman empty.
+//   - agent: CasketPubkey + CasketFingerprint + ResponsibleHuman set; LoginSecret empty.
+//
+// ID is the canonical entity UUID that consumers key on.
+type User struct {
+	ID                string
+	OrgID             string
+	Kind              Kind
+	DisplayName       string
+	Status            Status
+	LoginSecret       string // human only
+	CasketPubkey      []byte // agent only (ed25519 public key)
+	CasketFingerprint string // agent only
+	ResponsibleHuman  string // agent only (FK -> user.id of a human in the same org)
+	CreatedAt         string
+}
+
+// ScopeGrant is one capability granted to a user, with the granter recorded
+// for accountability ("who authorized this?").
+type ScopeGrant struct {
+	ID        string
+	UserID    string
+	Scope     string
+	GrantedBy string
+	CreatedAt string
+}
+
+// Store is herald's persistence seam. Implementations MUST be safe for
+// concurrent use.
+type Store interface {
+	// Orgs.
+	CreateOrg(ctx context.Context, name string) (Org, error)
+	GetOrg(ctx context.Context, id string) (Org, error)
+
+	// Users. CreateUser assigns an ID if the passed User.ID is empty and
+	// persists the row as-is (validation is the identity layer's job).
+	CreateUser(ctx context.Context, u User) (User, error)
+	GetUser(ctx context.Context, id string) (User, error)
+	GetUserByCasketFingerprint(ctx context.Context, fp string) (User, error)
+	ListAgentsByResponsibleHuman(ctx context.Context, humanID string) ([]User, error)
+	SetUserStatus(ctx context.Context, id string, s Status) error
+	SetOrgStatus(ctx context.Context, id string, s Status) error
+
+	// Scopes.
+	GrantScope(ctx context.Context, userID, scope, grantedBy string) (ScopeGrant, error)
+	RevokeScope(ctx context.Context, userID, scope string) error
+	ListScopes(ctx context.Context, userID string) ([]string, error)
+
+	// Close releases resources.
+	Close() error
+}
