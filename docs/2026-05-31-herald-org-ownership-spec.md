@@ -10,7 +10,7 @@ This is the **org-governance** slice. The **authentication-identity** slice it d
 
 ## 1. The one-paragraph architecture
 
-A user is a standalone account that can exist briefly with no org. A user with a token creates an org via the normal authenticated API and becomes its **owner**; the static `HERALD_ADMIN_TOKEN` shrinks to a deploy-time bootstrap that seeds only the first user. An owner mints **invite links** — secret tokens carrying a scope policy (a single email **domain**, or a known **email allowlist**), a role, an expiry, and a use cap — and distributes them through their own channels (herald sends nothing). An authenticated, email-verified user follows a link and is attached to that org with the link's role, provided their verified email satisfies the policy. Every user belongs to exactly **one** org (no many-to-many); org governance (`org_role`) is represented distinctly from capability (`scope_grant`). Provisioning within an org (creating agents) is re-gated on the caller's `org_role` instead of the global admin token, so the whole flow authenticates with herald-issued JWTs and passes cleanly through the gateway.
+A user is a standalone account that can exist briefly with no org. A user with a token creates an org via the normal authenticated API and becomes its **owner**; the static `HERALD_ADMIN_TOKEN` shrinks to a deploy-time bootstrap that seeds only the first user. An org has a **slug** — a globally-unique, DNS-safe label that is its tenant namespace (`<slug>.carriedworld.com`) — and, once an owner **verifies the org's email domain** via a DNS TXT record, a single verification unlocks three things at once: legitimacy of the slug claim (anti-squatting), the default `@<domain>` invite scope, and authorization for the platform to **send invites *as* that domain** (so a prospective member receives the invite from their own company's domain, not from the platform — better trust + deliverability). An owner mints **invite links** carrying a scope policy (a single email **domain**, or a known **email allowlist**), a role, an expiry, and a use cap; the link can be returned for the admin to distribute through their own channels, or — when the org's domain is verified — emailed by the platform from the org's domain. An authenticated, email-verified user follows a link and is attached to that org with the link's role, provided their verified email satisfies the policy. Every user belongs to exactly **one** org (no many-to-many); org governance (`org_role`) is represented distinctly from capability (`scope_grant`). Provisioning within an org (creating agents) is re-gated on the caller's `org_role` instead of the global admin token, so the whole flow authenticates with herald-issued JWTs and passes cleanly through the gateway.
 
 ```
   orgless user ──POST /api/orgs (user token)──► owns org  (org_role=owner)
@@ -25,12 +25,13 @@ A user is a standalone account that can exist briefly with no org. A user with a
 ## 2. Scope — what's IN
 
 1. **User can exist orgless.** `user.org_id` becomes nullable — the transient state between account creation (path-A) and creating/joining an org.
-2. **User creates + owns an org.** `POST /api/orgs` accepts a *user* token (not the admin token), creates the org, and sets the caller's `org_id` + `org_role=owner`. Rejected if the caller already belongs to an org (single-org invariant).
-3. **Invite links with a scope policy.** An owner creates an invite link carrying `policy_type ∈ {domain, email_list}`, `policy_value`, a `role` (default `member`), an `expires_at`, and a `max_uses`. Reusable within its policy until expired or exhausted. Herald returns the link token; **distribution is the admin's job** (their own lists) — herald sends no invite email.
-4. **Accept attaches to the org.** An authenticated, **email-verified** user follows the link; herald checks the invite is live (not expired, `uses < max_uses`) and the user's verified email satisfies the policy (domain-suffix match, or membership in the allowlist), then sets the user's `org_id` + `org_role` and increments `uses`.
-5. **Provisioning re-gated on role.** `POST /api/orgs/{org}/agents` (and any future human-add) require the caller's `org_role` to be `owner` for that org — enforced from the caller's herald token, not the static admin token.
-6. **`org_role` in the token.** Issued tokens carry `org_role` so consumers and herald's own gates reason about governance without a lookup.
-7. **Bootstrap shrinks.** `HERALD_ADMIN_TOKEN` survives only to seed the first user account at deploy time; everything after flows through the user→org model.
+2. **User creates + owns an org with a slug.** `POST /api/orgs` accepts a *user* token (not the admin token), creates the org with a **slug** (globally-unique, DNS-safe label = the tenant subdomain `<slug>.carriedworld.com`), and sets the caller's `org_id` + `org_role=owner`. Rejected if the caller already belongs to an org (single-org invariant). Slugs are validated (lowercase alphanumeric + hyphen, ≤63 chars) and checked against a **reserved list** (`www`, `api`, `herald`, `cairn`, `ledger`, `admin`, `mail`, `app`, …).
+3. **Org domain verification.** An owner verifies the org's email/sending domain (e.g. `acme.com`) by placing a herald-issued TXT record at a well-known name. A verified domain unlocks: (a) legitimacy of the slug claim (anti-squatting — a verified `acme.com` owner is entitled to the `acme` slug), (b) the default `@<domain>` invite scope, and (c) **send-as authorization** so the platform may email invites from that domain (the org also adds DKIM/SPF records herald specifies). Domain verification is optional for a private/first-come deployment but is the gate for the squat-proof + branded-email path.
+4. **Invite links with a scope policy + delivery choice.** An owner creates an invite link carrying `policy_type ∈ {domain, email_list}`, `policy_value`, a `role` (default `member`), an `expires_at`, and a `max_uses`. Reusable within its policy until expired or exhausted. Delivery is the admin's choice: **return the link** for out-of-band distribution (always available), or — when the org's domain is verified — have the platform **email the invite from the org's domain** via the Notifier (the trusted, better-deliverability path).
+5. **Accept attaches to the org.** An authenticated, **email-verified** user follows the link; herald checks the invite is live (not expired, `uses < max_uses`) and the user's verified email satisfies the policy (domain-suffix match, or membership in the allowlist), then sets the user's `org_id` + `org_role` and increments `uses`.
+6. **Provisioning re-gated on role.** `POST /api/orgs/{org}/agents` (and any future human-add) require the caller's `org_role` to be `owner` for that org — enforced from the caller's herald token, not the static admin token.
+7. **`org_role` in the token.** Issued tokens carry `org_role` so consumers and herald's own gates reason about governance without a lookup.
+8. **Bootstrap shrinks.** `HERALD_ADMIN_TOKEN` survives only to seed the first user account at deploy time; everything after flows through the user→org model.
 
 ---
 
@@ -38,7 +39,13 @@ A user is a standalone account that can exist briefly with no org. A user with a
 
 ```
 org
-  (unchanged: id, name, status, created_at)
+  id                TEXT PRIMARY KEY
+  name              TEXT NOT NULL                 -- display name (free text)
+  slug              TEXT NOT NULL UNIQUE          -- NEW: DNS-safe tenant label = <slug>.carriedworld.com
+  domain            TEXT NULL                     -- NEW: the org's verified email/sending domain (e.g. acme.com)
+  domain_verified_at TEXT NULL                    -- NEW: set when the DNS-TXT proof is confirmed
+  status            TEXT NOT NULL DEFAULT 'active'
+  created_at        TEXT NOT NULL DEFAULT (datetime('now'))
 
 user
   org_id     TEXT NULL  REFERENCES org(id)   -- WAS NOT NULL; now nullable (orgless transient)
@@ -47,12 +54,21 @@ user
   -- (unchanged: id, kind, display_name, status, login_secret, casket_pubkey,
   --  casket_fingerprint, responsible_human, created_at)
 
+org_domain_challenge                          -- NEW: pending domain-verification proofs
+  org_id       TEXT NOT NULL REFERENCES org(id)
+  domain       TEXT NOT NULL                  -- the domain being claimed (e.g. acme.com)
+  txt_token    TEXT NOT NULL                  -- the value to publish at _herald-challenge.<domain>
+  verified_at  TEXT NULL
+  created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+  PRIMARY KEY (org_id, domain)
+
 org_invite                                    -- NEW
   token        TEXT PRIMARY KEY               -- the link secret (high-entropy)
   org_id       TEXT NOT NULL REFERENCES org(id)
   role         TEXT NOT NULL DEFAULT 'member' -- role granted on accept
   policy_type  TEXT NOT NULL                  -- 'domain' | 'email_list'
   policy_value TEXT NOT NULL                  -- the domain string, OR a JSON array of emails
+  delivery     TEXT NOT NULL DEFAULT 'link'   -- 'link' (return for out-of-band) | 'email' (platform sends as org domain)
   expires_at   TEXT NULL                      -- optional expiry
   max_uses     INTEGER NOT NULL DEFAULT 0     -- 0 = unlimited within policy + expiry
   uses         INTEGER NOT NULL DEFAULT 0
@@ -62,6 +78,11 @@ org_invite                                    -- NEW
 scope_grant
   (unchanged — capability scopes stay separate from org governance)
 ```
+
+Slug + domain notes:
+- `slug` is the tenant subdomain; `*.carriedworld.com` is one wildcard (covered free by Cloudflare Universal SSL's single-level wildcard), so every tenant gets HTTPS with no per-tenant cert work. The gateway resolves the org from the request **Host** (subdomain) as a routing dimension alongside the existing path-prefix routing.
+- `domain` is set only once a matching `org_domain_challenge` is `verified_at`. `delivery='email'` invites require `domain_verified_at` to be non-null (the platform can only send-as a domain the org has proven it controls).
+- Reserved slugs (`www`, `api`, `herald`, `cairn`, `ledger`, `admin`, `mail`, `app`, …) are rejected at create time.
 
 Invariants:
 - A user has **at most one** org (`org_id` null or one value). No membership join-table — single-org is a deliberate choice (revisit only if many-to-many is ever needed).
@@ -89,10 +110,18 @@ Invariants:
 2. Herald verifies the token (kind=human, email_verified), checks the user has no `org_id`, creates the org, sets `user.org_id` + `user.org_role=owner`.
 3. Subsequent tokens for that user carry `org` + `org_role=owner`.
 
+### 5a-ii. Verify the org domain (optional, unlocks the branded path)
+1. An `owner` calls `POST /api/orgs/{org}/domain` with `{domain}` (e.g. `acme.com`).
+2. Herald creates an `org_domain_challenge` and returns the TXT record to publish (`_herald-challenge.acme.com = <txt_token>`) plus the DKIM/SPF records the ESP needs to send as that domain.
+3. The owner publishes the records; `POST /api/orgs/{org}/domain/verify` re-checks DNS; on success herald sets `org.domain` + `org.domain_verified_at`.
+4. Verification entitles the org to the matching slug (anti-squat), the default `@<domain>` invite scope, and `delivery='email'` invites.
+
 ### 5b. Create an invite link
-1. An `owner` calls `POST /api/orgs/{org}/invites` with `{policy_type, policy_value, role?, expires_at?, max_uses?}`.
-2. Herald confirms the caller's token has `org=={org}` and `org_role==owner`, generates a high-entropy `token`, stores the `org_invite` row, and returns the link (e.g. `<issuer>/invite/<token>` for a future accept UI, plus the raw token for API accept).
-3. The admin distributes the link through their own channels.
+1. An `owner` calls `POST /api/orgs/{org}/invites` with `{policy_type, policy_value, role?, expires_at?, max_uses?, delivery?, emails?}`.
+2. Herald confirms the caller's token has `org=={org}` and `org_role==owner`, generates a high-entropy `token`, stores the `org_invite` row, and returns the link (e.g. `https://<slug>.carriedworld.com/invite/<token>` for a future accept UI, plus the raw token for API accept).
+3. Delivery:
+   - `delivery='link'` (default, always available): herald returns the link; the admin distributes through their own channels.
+   - `delivery='email'` (requires `org.domain_verified_at`): herald sends the invite **from the org's verified domain** via the Notifier (§9) to the supplied `emails` (which must satisfy the policy). The recipient sees an invite from their own company's domain — the trusted, high-deliverability path.
 
 ### 5c. Accept an invite
 1. A path-A-authenticated, email-verified user (orgless) calls `POST /api/invites/{token}/accept`.
@@ -114,8 +143,10 @@ Invariants:
 ## 6. API surface (delta)
 
 New / changed:
-- `POST /api/orgs` — **changed**: now accepts a user token (was admin-gated); sets caller as owner.
-- `POST /api/orgs/{org}/invites` — **new**: owner-gated; create an invite link.
+- `POST /api/orgs` — **changed**: now accepts a user token (was admin-gated); takes `{name, slug}`; validates + reserves the slug; sets caller as owner.
+- `POST /api/orgs/{org}/domain` — **new**: owner-gated; begin domain verification, returns the TXT + DKIM/SPF records.
+- `POST /api/orgs/{org}/domain/verify` — **new**: owner-gated; re-check DNS, set `org.domain` on success.
+- `POST /api/orgs/{org}/invites` — **new**: owner-gated; create an invite link (`delivery` link|email).
 - `GET /api/orgs/{org}/invites` — **new**: owner-gated; list active invite links (no secrets beyond token prefix).
 - `DELETE /api/orgs/{org}/invites/{token}` — **new**: owner-gated; revoke a link.
 - `POST /api/invites/{token}/accept` — **new**: authenticated+verified user; attach to org.
@@ -145,6 +176,7 @@ This is server-side enforcement from the record; the `org_role` claim is a conve
 - **Org-scoped scope administration UI** — granting capability scopes to members.
 - **SSO / external IdP** — herald is the IdP.
 - **Invite analytics / per-acceptance audit beyond `uses`**.
+- **Bring-your-own custom hostname** — a customer pointing `git.acme.com` (their own domain) at the platform via **Cloudflare for SaaS** (custom hostnames + managed per-tenant certs). The `<slug>.carriedworld.com` model is forward-compatible with it; the custom-hostname tier is deferred.
 
 ---
 
@@ -154,7 +186,7 @@ This spec consumes a **verified-user identity** that path-A must provide. The pa
 
 - **`user.email`** (the login identity + the value invite policies match against) and **`user.email_verified`**.
 - **Email verification flow** — on signup/accept, herald issues a verification code/link and marks the email verified once confirmed; an unverified user cannot create an org or accept an invite.
-- **Pluggable `Notifier` interface** — `SendCode(ctx, email, code, purpose)` with deployment-wired implementations (the nexus email infra / SMTP / a test capture-stub). Herald grows a seam, not a mail server. Used for verification + (future) email 2FA codes.
+- **Pluggable `Notifier` interface** — sends from a **sending identity**, not just to an address: `Send(ctx, msg)` where `msg` carries the recipient, the body/purpose (verification code, 2FA code, org invite), and a **from-identity** that is the platform domain (`carriedworld.com`) for account-level mail or the **org's verified domain** for org-scoped invites (§2.4, §5b `delivery='email'`). Deployment-wired implementations: a transactional **ESP** (AWS SES — fits the AWS plan, supports multiple verified sending domains; or Postmark/Resend), or a test capture-stub. Herald grows a seam, not a mail server. Cloudflare Email Routing is **inbound-only** (forwarding) and is NOT the sender. The ESP holds the per-org verified sending domains (DKIM/SPF the org published during domain verification).
 - **2FA-readiness** — `totp_secret` (nullable) + a `2fa_enabled` flag on the user; the login flow has a second-factor step that is a no-op when disabled. TOTP (RFC 6238, authenticator-app, send-free) is the planned mechanism; the build is deferred but not designed out.
 
 Sequencing: path-A (with this amendment) lands first; org-ownership layers on top.
@@ -164,13 +196,17 @@ Sequencing: path-A (with this amendment) lands first; org-ownership layers on to
 ## 10. Build sequence (for the implementation plan)
 
 1. **Spec + decisions sign-off** (this doc) + the path-A amendment.
-2. **Schema migration** — `user.org_id` nullable + `user.org_role`; `org_invite` table. (NEX-405-aware: the conformance herald layer's `fixtures.ProvisionOrg` rewrites to this flow.)
-3. **Org creation by user token** — re-gate `POST /api/orgs`; set owner.
-4. **Invite links** — create/list/revoke (owner-gated) + the policy model.
-5. **Accept invite** — policy matching against the verified email; attach + increment uses.
-6. **Re-gate provisioning** on `org_role`; shrink the admin token to bootstrap (`POST /api/users`).
-7. **`org_role` in token claims** + consumer-visible.
-8. **Update cwb-conformance fixtures** (NEX-404 `ProvisionOrg`) to the user→org→provision flow, unblocking the herald layer (NEX-405) live.
+2. **Schema migration** — `user.org_id` nullable + `user.org_role`; `org.slug`/`domain`/`domain_verified_at`; `org_domain_challenge` + `org_invite` tables. (NEX-405-aware: the conformance herald layer's `fixtures.ProvisionOrg` rewrites to this flow.)
+3. **Org creation by user token** — re-gate `POST /api/orgs`; validate + reserve slug; set owner.
+4. **Org domain verification** — TXT-challenge issue + verify; set `org.domain`.
+5. **Invite links** — create/list/revoke (owner-gated) + the policy model + the `delivery` field.
+6. **Accept invite** — policy matching against the verified email; attach + increment uses.
+7. **Branded email invites** — `delivery='email'` sends from the org's verified domain via the Notifier (depends on the path-A Notifier + ESP backend).
+8. **Re-gate provisioning** on `org_role`; shrink the admin token to bootstrap (`POST /api/users`).
+9. **`org_role` in token claims** + consumer-visible.
+10. **Update cwb-conformance fixtures** (NEX-404 `ProvisionOrg`) to the user→org→provision flow, unblocking the herald layer (NEX-405) live.
+
+Subdomain tenant routing (resolving the org from `<slug>.carriedworld.com` in interchange) is a sibling **interchange** story, not herald — tracked separately.
 
 **DoD:** an email-verified user creates an org via their own token through the gateway, mints a domain-scoped invite link, a second verified user accepts it and lands as a member, the owner provisions an agent — all authenticated by herald JWTs through the gateway, with no use of the static admin token beyond seeding the first user.
 
@@ -183,3 +219,6 @@ Sequencing: path-A (with this amendment) lands first; org-ownership layers on to
 - **`POST /api/users` bootstrap vs a `herald-keytool seed-user` subcommand** — either seeds the first user; pick the one that keeps the admin token's surface smallest.
 - **Domain policy matching** — exact domain only, or allow subdomains? MVP: exact, case-insensitive. Confirm.
 - **Where email lives during the path-A amendment vs this spec** — the column is added by path-A; this spec only reads `email`/`email_verified`. Keep the migration ordering clean (path-A migration before org-ownership migration).
+- **Slug claim policy** — first-come (private/MVP) vs domain-verification-required (squat-proof, public). MVP can allow first-come slugs with domain verification *optional*; the squat-proof path requires `org.domain_verified_at` matching the slug. Pin per deployment posture.
+- **Subdomain tenant routing in interchange** — resolving the org from the request Host (`<slug>.carriedworld.com`) is a new routing dimension alongside path-prefix routing; design it in the gateway (likely a follow-up interchange story), not herald.
+- **ESP choice** — SES (AWS-native, multi-domain verified identities, cheap) vs Postmark/Resend (simpler transactional UX). Pin in the path-A Notifier plan; the interface is ESP-agnostic.
