@@ -49,6 +49,13 @@ func (id Identity) HasScope(s string) bool {
 type Config struct {
 	// Issuer is herald's issuer URL (must match the token's `iss`).
 	Issuer string
+	// JWKSURL, if set, is used directly to fetch the JWKS and OIDC
+	// discovery is skipped entirely. Issuer still controls the `iss`
+	// claim check. Use this when the consumer can reach JWKS over a
+	// different URL than the public issuer — e.g. a gateway whose
+	// public Issuer is itself, so its own heraldauth must fetch
+	// JWKS via the in-cluster service to avoid a boot loop.
+	JWKSURL string
 	// HTTPClient is used to fetch discovery + JWKS. Defaults to a 10s client.
 	HTTPClient *http.Client
 	// JWKSRefresh bounds how long a cached JWKS is reused before a refetch on
@@ -91,11 +98,15 @@ func New(ctx context.Context, cfg Config) (*Verifier, error) {
 	}
 	v := &Verifier{issuer: cfg.Issuer, http: hc, refresh: refresh, now: nowFn}
 
-	jwksURI, err := v.discoverJWKS(ctx)
-	if err != nil {
-		return nil, err
+	if cfg.JWKSURL != "" {
+		v.jwksURI = cfg.JWKSURL
+	} else {
+		jwksURI, err := v.discoverJWKS(ctx)
+		if err != nil {
+			return nil, err
+		}
+		v.jwksURI = jwksURI
 	}
-	v.jwksURI = jwksURI
 	if err := v.refreshKeys(ctx); err != nil {
 		return nil, err
 	}

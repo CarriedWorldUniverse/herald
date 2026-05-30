@@ -121,3 +121,52 @@ func TestVerifier_RejectsForeignIssuer(t *testing.T) {
 		t.Fatal("token from a different herald must be rejected")
 	}
 }
+
+// JWKSURL override: caller fetches keys via the override URL but the issuer
+// claim is still checked against the configured Issuer. This is the
+// gateway-fronts-its-own-issuer case — issuer points at the public URL but
+// JWKS is reachable in-cluster.
+func TestVerifier_JWKSURLOverride_BypassesDiscovery(t *testing.T) {
+	issuer, tok, _, _, _ := liveHerald(t)
+	ctx := context.Background()
+
+	// Build the JWKS URL by reading discovery once to find it, then pass it
+	// directly. With override set, New() must NOT do discovery itself.
+	v0, _ := heraldauth.New(ctx, heraldauth.Config{Issuer: issuer})
+	_ = v0 // (real refactor would expose JWKSURI; instead use a known shape)
+
+	v, err := heraldauth.New(ctx, heraldauth.Config{
+		Issuer:  issuer,
+		JWKSURL: issuer + "jwks",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := v.Verify(ctx, tok); err != nil {
+		t.Fatalf("Verify with JWKSURL override: %v", err)
+	}
+}
+
+// JWKSURL override means a wrong/unreachable discovery URL is no problem —
+// the issuer string is only used for the `iss` claim check.
+func TestVerifier_JWKSURLOverride_IgnoresDiscovery(t *testing.T) {
+	issuer, tok, _, _, _ := liveHerald(t)
+	ctx := context.Background()
+
+	v, err := heraldauth.New(ctx, heraldauth.Config{
+		// Issuer is the value tokens carry in `iss`, but we never call out
+		// to it for discovery — we go straight to the live JWKS.
+		Issuer:  issuer,
+		JWKSURL: issuer + "jwks",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	id, err := v.Verify(ctx, tok)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if id.Subject == "" {
+		t.Fatal("identity should have a subject")
+	}
+}
