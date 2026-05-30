@@ -1,0 +1,19 @@
+# herald container — tiny static Go binary on scratch.
+# Build from the herald repo root:
+#   podman build -f cmd/herald/Containerfile -t herald:dev .
+#   podman save herald:dev | sudo k3s ctr images import -
+#
+# Runtime config via env (see cmd/herald/main.go):
+#   HERALD_ADDR, HERALD_DB, HERALD_ISSUER, HERALD_ADMIN_TOKEN, HERALD_SIGNING_KEY
+FROM docker.io/library/golang:1.26 AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/herald ./cmd/herald
+
+FROM scratch
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=build /out/herald /herald
+EXPOSE 8099
+ENTRYPOINT ["/herald"]
