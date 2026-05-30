@@ -95,6 +95,15 @@ func (p *Provider) SetTokenHandler(h TokenHandler) { p.tokenEP = h }
 // Issuer returns the configured issuer URL.
 func (p *Provider) Issuer() string { return p.issuer }
 
+// TokenURL returns the canonical token endpoint URL — issuer + "/token". This
+// is what the discovery doc advertises as `token_endpoint` and what agents
+// MUST use as the audience claim in their jwt-bearer assertions. Comparing
+// the assertion's audience against this (instead of the inbound request URL)
+// lets herald sit behind a reverse proxy without breaking authentication.
+func (p *Provider) TokenURL() string {
+	return strings.TrimRight(p.issuer, "/") + "/token"
+}
+
 // TTL returns the access-token lifetime.
 func (p *Provider) TTL() time.Duration { return p.ttl }
 
@@ -179,7 +188,7 @@ func (p *Provider) handleDiscovery(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"issuer":                                p.issuer,
 		"jwks_uri":                              base + "/jwks",
-		"token_endpoint":                        base + "/token",
+		"token_endpoint":                        p.TokenURL(),
 		"grant_types_supported":                 []string{"urn:ietf:params:oauth:grant-type:jwt-bearer"},
 		"id_token_signing_alg_values_supported": []string{"EdDSA"},
 		"token_endpoint_auth_methods_supported": []string{"private_key_jwt"},

@@ -58,7 +58,7 @@ func (g *AgentGrant) ServeToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tok, err := g.issue(r.Context(), assertion, requestTokenURL(r))
+	tok, err := g.issue(r.Context(), assertion, g.p.TokenURL())
 	if err != nil {
 		// Uniform 401 for all assertion failures — don't leak which check failed.
 		oauthError(w, http.StatusUnauthorized, "invalid_grant", "assertion rejected")
@@ -164,14 +164,6 @@ func (c assertionClaims) audienceMatches(want string) bool {
 		}
 	}
 	return false
-}
-
-func requestTokenURL(r *http.Request) string {
-	scheme := "https"
-	if r.TLS == nil {
-		scheme = "http"
-	}
-	return scheme + "://" + r.Host + r.URL.Path
 }
 
 func oauthError(w http.ResponseWriter, status int, code, desc string) {
