@@ -1,0 +1,234 @@
+package store
+
+import (
+	"context"
+	"database/sql"
+	_ "embed"
+	"errors"
+	"fmt"
+
+	"github.com/google/uuid"
+	_ "modernc.org/sqlite"
+)
+
+//go:embed schema.sql
+var schemaSQL string
+
+// SQLite is the modernc.org/sqlite-backed Store (CGO-free). Safe for
+// concurrent use: *sql.DB is, and SQLite serializes writes.
+type SQLite struct {
+	db *sql.DB
+}
+
+// Open opens (or creates) the SQLite database at path and applies the schema.
+// Use ":memory:" for tests. For a file DB, foreign keys + WAL are enabled.
+func Open(path string) (*SQLite, error) {
+	dsn := path
+	if path == ":memory:" {
+		// Shared cache so the single *sql.DB connection pool sees one in-mem db.
+		dsn = "file::memory:?cache=shared"
+	}
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("store.Open: %w", err)
+	}
+	// One connection for :memory: shared-cache safety; file DBs are fine too.
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec("PRAGMA foreign_keys = ON;"); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("store.Open: enable fk: %w", err)
+	}
+	if _, err := db.Exec(schemaSQL); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("store.Open: apply schema: %w", err)
+	}
+	return &SQLite{db: db}, nil
+}
+
+func (s *SQLite) Close() error { return s.db.Close() }
+
+func newID() string { return uuid.NewString() }
+
+func (s *SQLite) CreateOrg(ctx context.Context, name string) (Org, error) {
+	o := Org{ID: newID(), Name: name, Status: StatusActive}
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO org (id, name, status) VALUES (?, ?, ?)`,
+		o.ID, o.Name, string(o.Status))
+	if err != nil {
+		return Org{}, fmt.Errorf("CreateOrg: %w", err)
+	}
+	return s.GetOrg(ctx, o.ID)
+}
+
+func (s *SQLite) GetOrg(ctx context.Context, id string) (Org, error) {
+	var o Org
+	var status string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, name, status, created_at FROM org WHERE id = ?`, id).
+		Scan(&o.ID, &o.Name, &status, &o.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Org{}, ErrNotFound
+	}
+	if err != nil {
+		return Org{}, fmt.Errorf("GetOrg: %w", err)
+	}
+	o.Status = Status(status)
+	return o, nil
+}
+
+func (s *SQLite) CreateUser(ctx context.Context, u User) (User, error) {
+	if u.ID == "" {
+		u.ID = newID()
+	}
+	if u.Status == "" {
+		u.Status = StatusActive
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO user (id, org_id, kind, display_name, status,
+		                  login_secret, casket_pubkey, casket_fingerprint, responsible_human)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		u.ID, u.OrgID, string(u.Kind), u.DisplayName, string(u.Status),
+		nullStr(u.LoginSecret), nullBytes(u.CasketPubkey), nullStr(u.CasketFingerprint), nullStr(u.ResponsibleHuman))
+	if err != nil {
+		return User{}, fmt.Errorf("CreateUser: %w", err)
+	}
+	return s.GetUser(ctx, u.ID)
+}
+
+func (s *SQLite) GetUser(ctx context.Context, id string) (User, error) {
+	return s.scanUser(s.db.QueryRowContext(ctx, userSelect+` WHERE id = ?`, id))
+}
+
+func (s *SQLite) GetUserByCasketFingerprint(ctx context.Context, fp string) (User, error) {
+	return s.scanUser(s.db.QueryRowContext(ctx, userSelect+` WHERE casket_fingerprint = ?`, fp))
+}
+
+func (s *SQLite) ListAgentsByResponsibleHuman(ctx context.Context, humanID string) ([]User, error) {
+	rows, err := s.db.QueryContext(ctx, userSelect+` WHERE responsible_human = ?`, humanID)
+	if err != nil {
+		return nil, fmt.Errorf("ListAgentsByResponsibleHuman: %w", err)
+	}
+	defer rows.Close()
+	var out []User
+	for rows.Next() {
+		u, err := scanUserRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLite) SetUserStatus(ctx context.Context, id string, st Status) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE user SET status = ? WHERE id = ?`, string(st), id)
+	if err != nil {
+		return fmt.Errorf("SetUserStatus: %w", err)
+	}
+	return mustAffect(res)
+}
+
+func (s *SQLite) SetOrgStatus(ctx context.Context, id string, st Status) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE org SET status = ? WHERE id = ?`, string(st), id)
+	if err != nil {
+		return fmt.Errorf("SetOrgStatus: %w", err)
+	}
+	return mustAffect(res)
+}
+
+func (s *SQLite) GrantScope(ctx context.Context, userID, scope, grantedBy string) (ScopeGrant, error) {
+	g := ScopeGrant{ID: newID(), UserID: userID, Scope: scope, GrantedBy: grantedBy}
+	// Idempotent: ON CONFLICT(user_id, scope) keep the existing row.
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO scope_grant (id, user_id, scope, granted_by) VALUES (?, ?, ?, ?)
+		ON CONFLICT(user_id, scope) DO NOTHING`,
+		g.ID, g.UserID, g.Scope, nullStr(g.GrantedBy))
+	if err != nil {
+		return ScopeGrant{}, fmt.Errorf("GrantScope: %w", err)
+	}
+	return g, nil
+}
+
+func (s *SQLite) RevokeScope(ctx context.Context, userID, scope string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM scope_grant WHERE user_id = ? AND scope = ?`, userID, scope)
+	if err != nil {
+		return fmt.Errorf("RevokeScope: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLite) ListScopes(ctx context.Context, userID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT scope FROM scope_grant WHERE user_id = ? ORDER BY scope`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("ListScopes: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var sc string
+		if err := rows.Scan(&sc); err != nil {
+			return nil, err
+		}
+		out = append(out, sc)
+	}
+	return out, rows.Err()
+}
+
+// --- scan helpers ---
+
+const userSelect = `SELECT id, org_id, kind, display_name, status,
+	login_secret, casket_pubkey, casket_fingerprint, responsible_human, created_at FROM user`
+
+type scanner interface{ Scan(dest ...any) error }
+
+func (s *SQLite) scanUser(row scanner) (User, error) {
+	u, err := scanUserRow(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return User{}, ErrNotFound
+	}
+	return u, err
+}
+
+func scanUserRow(row scanner) (User, error) {
+	var u User
+	var kind, status string
+	var login, fp, resp sql.NullString
+	var pub []byte
+	if err := row.Scan(&u.ID, &u.OrgID, &kind, &u.DisplayName, &status,
+		&login, &pub, &fp, &resp, &u.CreatedAt); err != nil {
+		return User{}, err
+	}
+	u.Kind = Kind(kind)
+	u.Status = Status(status)
+	u.LoginSecret = login.String
+	u.CasketPubkey = pub
+	u.CasketFingerprint = fp.String
+	u.ResponsibleHuman = resp.String
+	return u, nil
+}
+
+func nullStr(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+func nullBytes(b []byte) any {
+	if len(b) == 0 {
+		return nil
+	}
+	return b
+}
+
+func mustAffect(res sql.Result) error {
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
