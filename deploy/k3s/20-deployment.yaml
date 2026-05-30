@@ -30,7 +30,11 @@ spec:
             - name: HERALD_DB
               value: "/var/lib/nexus/herald.db"
             - name: HERALD_ISSUER
-              value: "http://herald.cwb.svc:8099/"
+              # Public, gateway-facing URL. Tokens carry this in `iss`; OIDC
+              # discovery + jwks_uri are derived from it, so external
+              # consumers resolve everything through the gateway. Override
+              # via patch when running on a different host/DNS.
+              value: "http://dmonextreme.tail41686e.ts.net:8080/herald/"
             - name: HERALD_ADMIN_TOKEN
               valueFrom:
                 secretKeyRef:
