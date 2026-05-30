@@ -10,7 +10,7 @@ This is the **org-governance** slice. The **authentication-identity** slice it d
 
 ## 1. The one-paragraph architecture
 
-A user is a standalone account that can exist briefly with no org. A user with a token creates an org via the normal authenticated API and becomes its **owner**; the static `HERALD_ADMIN_TOKEN` shrinks to a deploy-time bootstrap that seeds only the first user. An org has a **slug** — a globally-unique, DNS-safe label that is its tenant namespace (`<slug>.carriedworld.com`) — and, once an owner **verifies the org's email domain** via a DNS TXT record, a single verification unlocks three things at once: legitimacy of the slug claim (anti-squatting), the default `@<domain>` invite scope, and authorization for the platform to **send invites *as* that domain** (so a prospective member receives the invite from their own company's domain, not from the platform — better trust + deliverability). An owner mints **invite links** carrying a scope policy (a single email **domain**, or a known **email allowlist**), a role, an expiry, and a use cap; the link can be returned for the admin to distribute through their own channels, or — when the org's domain is verified — emailed by the platform from the org's domain. An authenticated, email-verified user follows a link and is attached to that org with the link's role, provided their verified email satisfies the policy. Every user belongs to exactly **one** org (no many-to-many); org governance (`org_role`) is represented distinctly from capability (`scope_grant`). Provisioning within an org (creating agents) is re-gated on the caller's `org_role` instead of the global admin token, so the whole flow authenticates with herald-issued JWTs and passes cleanly through the gateway.
+A user is a standalone account that can exist briefly with no org. A user with a token creates an org via the normal authenticated API and becomes its **owner**; the static `HERALD_ADMIN_TOKEN` shrinks to a deploy-time bootstrap that seeds only the first user. An org has a **slug** under a **trust tier** — a DNS-safe label that is its tenant namespace at `<slug>.<tier>.carriedworld.com`, where `tier` is `hosted` (general, self-serve, first-come) or `trusted` (proven registered companies, the paid + vouched tier) — and, once an owner **verifies the org's email domain** via a DNS TXT record, a single verification unlocks three things at once: legitimacy of the slug claim (anti-squatting), the default `@<domain>` invite scope, and authorization for the platform to **send invites *as* that domain** (so a prospective member receives the invite from their own company's domain, not from the platform — better trust + deliverability). An owner mints **invite links** carrying a scope policy (a single email **domain**, or a known **email allowlist**), a role, an expiry, and a use cap; the link can be returned for the admin to distribute through their own channels, or — when the org's domain is verified — emailed by the platform from the org's domain. An authenticated, email-verified user follows a link and is attached to that org with the link's role, provided their verified email satisfies the policy. Every user belongs to exactly **one** org (no many-to-many); org governance (`org_role`) is represented distinctly from capability (`scope_grant`). Provisioning within an org (creating agents) is re-gated on the caller's `org_role` instead of the global admin token, so the whole flow authenticates with herald-issued JWTs and passes cleanly through the gateway.
 
 ```
   orgless user ──POST /api/orgs (user token)──► owns org  (org_role=owner)
@@ -25,7 +25,9 @@ A user is a standalone account that can exist briefly with no org. A user with a
 ## 2. Scope — what's IN
 
 1. **User can exist orgless.** `user.org_id` becomes nullable — the transient state between account creation (path-A) and creating/joining an org.
-2. **User creates + owns an org with a slug.** `POST /api/orgs` accepts a *user* token (not the admin token), creates the org with a **slug** (globally-unique, DNS-safe label = the tenant subdomain `<slug>.carriedworld.com`), and sets the caller's `org_id` + `org_role=owner`. Rejected if the caller already belongs to an org (single-org invariant). Slugs are validated (lowercase alphanumeric + hyphen, ≤63 chars) and checked against a **reserved list** (`www`, `api`, `herald`, `cairn`, `ledger`, `admin`, `mail`, `app`, …).
+2. **User creates + owns an org with a slug, under a trust tier.** `POST /api/orgs` accepts a *user* token (not the admin token), creates the org with a **slug** + a **tier** (`hosted` | `trusted`), and sets the caller's `org_id` + `org_role=owner`. The tenant hostname nests under the tier: **`<slug>.<tier>.carriedworld.com`** — `<slug>.hosted.carriedworld.com` for the general tier, `<slug>.trusted.carriedworld.com` for proven companies. Rejected if the caller already belongs to an org (single-org invariant). Slugs are validated (lowercase alphanumeric + hyphen, ≤63 chars) and checked against a **reserved list** (`hosted`, `trusted`, `www`, `api`, `herald`, `cairn`, `ledger`, `admin`, `mail`, `app`, …).
+   - **`hosted`** (general, the default tier): self-serve; slug is **first-come** + reserved-list only (squatting on the general tier is accepted for MVP).
+   - **`trusted`** (proven, registered companies — effectively the paid tier): a customer-facing trust signal. Domain verification (§2.3) is the floor; the heavier "proven company" gate (business-registry / KYB / manual review) is **deferred to commercial-onboarding design** (§8). A `hosted` org graduates to `trusted` once it clears that bar.
 3. **Org domain verification.** An owner verifies the org's email/sending domain (e.g. `acme.com`) by placing a herald-issued TXT record at a well-known name. A verified domain unlocks: (a) legitimacy of the slug claim (anti-squatting — a verified `acme.com` owner is entitled to the `acme` slug), (b) the default `@<domain>` invite scope, and (c) **send-as authorization** so the platform may email invites from that domain (the org also adds DKIM/SPF records herald specifies). Domain verification is optional for a private/first-come deployment but is the gate for the squat-proof + branded-email path.
 4. **Invite links with a scope policy + delivery choice.** An owner creates an invite link carrying `policy_type ∈ {domain, email_list}`, `policy_value`, a `role` (default `member`), an `expires_at`, and a `max_uses`. Reusable within its policy until expired or exhausted. Delivery is the admin's choice: **return the link** for out-of-band distribution (always available), or — when the org's domain is verified — have the platform **email the invite from the org's domain** via the Notifier (the trusted, better-deliverability path).
 5. **Accept attaches to the org.** An authenticated, **email-verified** user follows the link; herald checks the invite is live (not expired, `uses < max_uses`) and the user's verified email satisfies the policy (domain-suffix match, or membership in the allowlist), then sets the user's `org_id` + `org_role` and increments `uses`.
@@ -41,11 +43,13 @@ A user is a standalone account that can exist briefly with no org. A user with a
 org
   id                TEXT PRIMARY KEY
   name              TEXT NOT NULL                 -- display name (free text)
-  slug              TEXT NOT NULL UNIQUE          -- NEW: DNS-safe tenant label = <slug>.carriedworld.com
+  slug              TEXT NOT NULL                 -- NEW: DNS-safe tenant label
+  tier              TEXT NOT NULL DEFAULT 'hosted'-- NEW: 'hosted' | 'trusted'; hostname = <slug>.<tier>.carriedworld.com
   domain            TEXT NULL                     -- NEW: the org's verified email/sending domain (e.g. acme.com)
   domain_verified_at TEXT NULL                    -- NEW: set when the DNS-TXT proof is confirmed
   status            TEXT NOT NULL DEFAULT 'active'
   created_at        TEXT NOT NULL DEFAULT (datetime('now'))
+  UNIQUE(tier, slug)                              -- slug unique within its tier
 
 user
   org_id     TEXT NULL  REFERENCES org(id)   -- WAS NOT NULL; now nullable (orgless transient)
@@ -79,10 +83,12 @@ scope_grant
   (unchanged — capability scopes stay separate from org governance)
 ```
 
-Slug + domain notes:
-- `slug` is the tenant subdomain; `*.carriedworld.com` is one wildcard (covered free by Cloudflare Universal SSL's single-level wildcard), so every tenant gets HTTPS with no per-tenant cert work. The gateway resolves the org from the request **Host** (subdomain) as a routing dimension alongside the existing path-prefix routing.
+Slug + tier + domain notes:
+- The tenant hostname is `<slug>.<tier>.carriedworld.com` (two levels deep). The gateway resolves the org from the request **Host** (tier + slug) as a routing dimension alongside the existing path-prefix routing.
+- **Cert implication:** a two-level wildcard (`*.hosted.carriedworld.com`, `*.trusted.carriedworld.com`) is **not** covered by Cloudflare's free single-level Universal SSL. The edge wildcard needs **Cloudflare Advanced Certificate Manager (~$10/mo ≈ $120/yr)** — accepted, since `trusted` is the paid tier and the cost is trivial against tenant revenue. (Alternatives if ever wanted: per-tenant certs via Cloudflare for SaaS, or a cert-manager/Let's-Encrypt two-level wildcard at the origin via DNS-01.)
+- `slug` is unique **within a tier** (`UNIQUE(tier, slug)`) — `acme.hosted` and `acme.trusted` are distinct namespaces.
 - `domain` is set only once a matching `org_domain_challenge` is `verified_at`. `delivery='email'` invites require `domain_verified_at` to be non-null (the platform can only send-as a domain the org has proven it controls).
-- Reserved slugs (`www`, `api`, `herald`, `cairn`, `ledger`, `admin`, `mail`, `app`, …) are rejected at create time.
+- Reserved slugs (`hosted`, `trusted`, `www`, `api`, `herald`, `cairn`, `ledger`, `admin`, `mail`, `app`, …) are rejected at create time.
 
 Invariants:
 - A user has **at most one** org (`org_id` null or one value). No membership join-table — single-org is a deliberate choice (revisit only if many-to-many is ever needed).
@@ -106,8 +112,8 @@ Invariants:
 ## 5. Auth flows
 
 ### 5a. Create an org
-1. A path-A-authenticated, email-verified user (orgless) calls `POST /api/orgs` with `{name}` and their bearer token.
-2. Herald verifies the token (kind=human, email_verified), checks the user has no `org_id`, creates the org, sets `user.org_id` + `user.org_role=owner`.
+1. A path-A-authenticated, email-verified user (orgless) calls `POST /api/orgs` with `{name, slug, tier?}` and their bearer token. `tier` defaults to `hosted`; creating directly in `trusted` requires the (deferred) proven-company gate.
+2. Herald verifies the token (kind=human, email_verified), checks the user has no `org_id`, validates+reserves the slug within the tier, creates the org, sets `user.org_id` + `user.org_role=owner`.
 3. Subsequent tokens for that user carry `org` + `org_role=owner`.
 
 ### 5a-ii. Verify the org domain (optional, unlocks the branded path)
@@ -143,7 +149,7 @@ Invariants:
 ## 6. API surface (delta)
 
 New / changed:
-- `POST /api/orgs` — **changed**: now accepts a user token (was admin-gated); takes `{name, slug}`; validates + reserves the slug; sets caller as owner.
+- `POST /api/orgs` — **changed**: now accepts a user token (was admin-gated); takes `{name, slug, tier?}` (tier defaults `hosted`); validates + reserves the slug within the tier; sets caller as owner.
 - `POST /api/orgs/{org}/domain` — **new**: owner-gated; begin domain verification, returns the TXT + DKIM/SPF records.
 - `POST /api/orgs/{org}/domain/verify` — **new**: owner-gated; re-check DNS, set `org.domain` on success.
 - `POST /api/orgs/{org}/invites` — **new**: owner-gated; create an invite link (`delivery` link|email).
@@ -176,7 +182,8 @@ This is server-side enforcement from the record; the `org_role` claim is a conve
 - **Org-scoped scope administration UI** — granting capability scopes to members.
 - **SSO / external IdP** — herald is the IdP.
 - **Invite analytics / per-acceptance audit beyond `uses`**.
-- **Bring-your-own custom hostname** — a customer pointing `git.acme.com` (their own domain) at the platform via **Cloudflare for SaaS** (custom hostnames + managed per-tenant certs). The `<slug>.carriedworld.com` model is forward-compatible with it; the custom-hostname tier is deferred.
+- **Trusted-tier "proven company" gate + promotion flow** — the bar to become `trusted` beyond domain verification (business-registry / KYB check, or manual operator approval) is **deferred to commercial-onboarding design**, since `trusted` is effectively the paid tier. MVP can ship `hosted` (first-come) + treat `trusted` as domain-verified-plus-manual-flip until the commercial flow exists. Promotion `hosted`→`trusted` (re-home the slug under the new tier namespace) lands with that work.
+- **Bring-your-own custom hostname** — a customer pointing `git.acme.com` (their own domain) at the platform via **Cloudflare for SaaS** (custom hostnames + managed per-tenant certs). The `<slug>.<tier>.carriedworld.com` model is forward-compatible with it; the custom-hostname tier is deferred.
 
 ---
 
@@ -197,7 +204,7 @@ Sequencing: path-A (with this amendment) lands first; org-ownership layers on to
 
 1. **Spec + decisions sign-off** (this doc) + the path-A amendment.
 2. **Schema migration** — `user.org_id` nullable + `user.org_role`; `org.slug`/`domain`/`domain_verified_at`; `org_domain_challenge` + `org_invite` tables. (NEX-405-aware: the conformance herald layer's `fixtures.ProvisionOrg` rewrites to this flow.)
-3. **Org creation by user token** — re-gate `POST /api/orgs`; validate + reserve slug; set owner.
+3. **Org creation by user token** — re-gate `POST /api/orgs`; validate + reserve slug within tier (`hosted` default); set owner.
 4. **Org domain verification** — TXT-challenge issue + verify; set `org.domain`.
 5. **Invite links** — create/list/revoke (owner-gated) + the policy model + the `delivery` field.
 6. **Accept invite** — policy matching against the verified email; attach + increment uses.
@@ -219,6 +226,7 @@ Subdomain tenant routing (resolving the org from `<slug>.carriedworld.com` in in
 - **`POST /api/users` bootstrap vs a `herald-keytool seed-user` subcommand** — either seeds the first user; pick the one that keeps the admin token's surface smallest.
 - **Domain policy matching** — exact domain only, or allow subdomains? MVP: exact, case-insensitive. Confirm.
 - **Where email lives during the path-A amendment vs this spec** — the column is added by path-A; this spec only reads `email`/`email_verified`. Keep the migration ordering clean (path-A migration before org-ownership migration).
-- **Slug claim policy** — first-come (private/MVP) vs domain-verification-required (squat-proof, public). MVP can allow first-come slugs with domain verification *optional*; the squat-proof path requires `org.domain_verified_at` matching the slug. Pin per deployment posture.
+- **Slug claim policy** — decided: `hosted` tier is **first-come + reserved-list only** (squatting accepted at the general tier for MVP); `trusted` tier gets the squat-proof + vouched path. The trusted-tier verification bar itself is parked (§8) — domain-verification is the floor.
+- **Tier wildcard cert** — decided: two-level wildcard via Cloudflare Advanced Certificate Manager (~$120/yr), accepted because `trusted` is the revenue tier. Confirm at AWS/edge stand-up whether to use ACM-edge or origin-issued (cert-manager/DNS-01) wildcards.
 - **Subdomain tenant routing in interchange** — resolving the org from the request Host (`<slug>.carriedworld.com`) is a new routing dimension alongside path-prefix routing; design it in the gateway (likely a follow-up interchange story), not herald.
 - **ESP choice** — SES (AWS-native, multi-domain verified identities, cheap) vs Postmark/Resend (simpler transactional UX). Pin in the path-A Notifier plan; the interface is ESP-agnostic.
