@@ -90,7 +90,7 @@ func TestAgentGrant_CasketSignedAssertion_IssuesToken(t *testing.T) {
 	_ = svc.GrantScope(ctx, a.ID, "repo:write", h.ID)
 	_ = svc.GrantScope(ctx, a.ID, "repo:read", h.ID)
 
-	assertion := signAssertion(t, a.ID, srv.URL+"/token", priv, time.Now().Add(2*time.Minute))
+	assertion := signAssertion(t, a.ID, p.TokenURL(), priv, time.Now().Add(2*time.Minute))
 	resp, body := postAssertion(t, srv.URL+"/token", assertion)
 	if resp.StatusCode != 200 {
 		t.Fatalf("token endpoint status=%d body=%+v", resp.StatusCode, body)
@@ -127,7 +127,7 @@ func TestAgentGrant_CasketSignedAssertion_IssuesToken(t *testing.T) {
 }
 
 func TestAgentGrant_WrongKey_Rejected(t *testing.T) {
-	_, svc, srv := testStack(t)
+	p, svc, srv := testStack(t)
 	ctx := context.Background()
 	org, _ := svc.CreateOrg(ctx, "acme")
 	h, _ := svc.CreateHuman(ctx, org.ID, "jacinta")
@@ -136,7 +136,7 @@ func TestAgentGrant_WrongKey_Rejected(t *testing.T) {
 
 	// Sign with a DIFFERENT key than the one registered for the agent.
 	wrongPriv, _, _ := casket.DeriveAgentKey([]byte(grantTestSeed), "imposter")
-	assertion := signAssertion(t, a.ID, srv.URL+"/token", wrongPriv, time.Now().Add(2*time.Minute))
+	assertion := signAssertion(t, a.ID, p.TokenURL(), wrongPriv, time.Now().Add(2*time.Minute))
 	resp, _ := postAssertion(t, srv.URL+"/token", assertion)
 	if resp.StatusCode == 200 {
 		t.Fatal("assertion signed by the wrong key must be rejected")
@@ -144,7 +144,7 @@ func TestAgentGrant_WrongKey_Rejected(t *testing.T) {
 }
 
 func TestAgentGrant_BlockedHuman_Rejected(t *testing.T) {
-	_, svc, srv := testStack(t)
+	p, svc, srv := testStack(t)
 	ctx := context.Background()
 	org, _ := svc.CreateOrg(ctx, "acme")
 	h, _ := svc.CreateHuman(ctx, org.ID, "jacinta")
@@ -152,7 +152,7 @@ func TestAgentGrant_BlockedHuman_Rejected(t *testing.T) {
 	a, _ := svc.CreateAgent(ctx, org.ID, "anvil", h.ID, pub)
 	_ = svc.BlockUser(ctx, h.ID) // cascade: agent must not be able to mint
 
-	assertion := signAssertion(t, a.ID, srv.URL+"/token", priv, time.Now().Add(2*time.Minute))
+	assertion := signAssertion(t, a.ID, p.TokenURL(), priv, time.Now().Add(2*time.Minute))
 	resp, _ := postAssertion(t, srv.URL+"/token", assertion)
 	if resp.StatusCode == 200 {
 		t.Fatal("agent of a blocked human must be rejected (cascade)")
@@ -160,14 +160,14 @@ func TestAgentGrant_BlockedHuman_Rejected(t *testing.T) {
 }
 
 func TestAgentGrant_ExpiredAssertion_Rejected(t *testing.T) {
-	_, svc, srv := testStack(t)
+	p, svc, srv := testStack(t)
 	ctx := context.Background()
 	org, _ := svc.CreateOrg(ctx, "acme")
 	h, _ := svc.CreateHuman(ctx, org.ID, "jacinta")
 	priv, pub, _ := casket.DeriveAgentKey([]byte(grantTestSeed), "anvil")
 	a, _ := svc.CreateAgent(ctx, org.ID, "anvil", h.ID, pub)
 
-	assertion := signAssertion(t, a.ID, srv.URL+"/token", priv, time.Now().Add(-1*time.Minute))
+	assertion := signAssertion(t, a.ID, p.TokenURL(), priv, time.Now().Add(-1*time.Minute))
 	resp, _ := postAssertion(t, srv.URL+"/token", assertion)
 	if resp.StatusCode == 200 {
 		t.Fatal("expired assertion must be rejected")
@@ -189,7 +189,7 @@ func TestAgentGrant_ClientCannotForgeResponsibleHuman(t *testing.T) {
 	signer, _ := jose.NewSigner(jose.SigningKey{Algorithm: jose.EdDSA, Key: priv},
 		(&jose.SignerOptions{}).WithType("JWT"))
 	payload, _ := json.Marshal(map[string]any{
-		"iss": a.ID, "sub": a.ID, "aud": srv.URL + "/token",
+		"iss": a.ID, "sub": a.ID, "aud": p.TokenURL(),
 		"iat": time.Now().Unix(), "exp": time.Now().Add(2 * time.Minute).Unix(),
 		"act":               map[string]any{"sub": "human:imposter"},
 		"responsible_human": "human:imposter",
@@ -205,5 +205,43 @@ func TestAgentGrant_ClientCannotForgeResponsibleHuman(t *testing.T) {
 	act, _ := claims["act"].(map[string]any)
 	if act["sub"] != realHuman.ID {
 		t.Fatalf("herald must stamp act.sub from the record (%v), not client input; got %v", realHuman.ID, act["sub"])
+	}
+}
+
+// Regression for the audience-check bug: when herald sits behind a reverse
+// proxy, the inbound request's Host header doesn't match the issuer URL. The
+// assertion's `aud` claim is — correctly — the canonical token URL from the
+// discovery doc (issuer + "/token"), not the proxy's backend URL. Herald must
+// compare against its configured issuer-derived URL, NOT the request URL.
+func TestAgentGrant_AudienceFromIssuer_WorksBehindProxy(t *testing.T) {
+	p, svc, srv := testStack(t)
+	ctx := context.Background()
+	org, _ := svc.CreateOrg(ctx, "acme")
+	h, _ := svc.CreateHuman(ctx, org.ID, "jacinta")
+	priv, pub, _ := casket.DeriveAgentKey([]byte(grantTestSeed), "anvil")
+	a, _ := svc.CreateAgent(ctx, org.ID, "anvil", h.ID, pub)
+	_ = svc.GrantScope(ctx, a.ID, "repo:write", h.ID)
+
+	// Build the request manually so we can override Host to simulate the
+	// reverse-proxy shape (backend URL ≠ issuer URL).
+	assertion := signAssertion(t, a.ID, p.TokenURL(), priv, time.Now().Add(2*time.Minute))
+	form := url.Values{
+		"grant_type": {"urn:ietf:params:oauth:grant-type:jwt-bearer"},
+		"assertion":  {assertion},
+	}
+	req, _ := http.NewRequest("POST", srv.URL+"/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	// Pretend the gateway rewrote Host to the cluster service URL.
+	req.Host = "herald.cwb.svc:8099"
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /token: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		var body map[string]any
+		_ = json.NewDecoder(resp.Body).Decode(&body)
+		t.Fatalf("proxy-shaped request status=%d body=%+v — herald must accept assertions whose aud matches issuer+\"/token\", not r.Host", resp.StatusCode, body)
 	}
 }
