@@ -26,6 +26,10 @@ type Status string
 const (
 	StatusActive  Status = "active"
 	StatusBlocked Status = "blocked"
+	// StatusPending is a self-provisioned agent awaiting human validation.
+	// Pending agents exist but cannot authenticate until a human flips them
+	// to active (human-in-the-loop at account birth).
+	StatusPending Status = "pending"
 )
 
 // ErrNotFound is returned by Get* when no row matches.

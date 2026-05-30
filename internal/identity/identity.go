@@ -52,9 +52,21 @@ func (svc *Service) CreateHuman(ctx context.Context, orgID, displayName string) 
 }
 
 // CreateAgent creates an agent owned by (responsible to) the given human, in
-// the same org, registering its casket public key. responsibleHuman MUST be a
-// human in orgID. The agent's fingerprint is computed from pub.
+// the same org, with status Active. Used by the admin-bootstrap path (the
+// first agents, before any agent token exists). For self-provisioned agents
+// that must await human validation, use CreateAgentPending.
 func (svc *Service) CreateAgent(ctx context.Context, orgID, displayName, responsibleHuman string, pub ed25519.PublicKey) (store.User, error) {
+	return svc.createAgent(ctx, orgID, displayName, responsibleHuman, pub, store.StatusActive)
+}
+
+// CreateAgentPending creates a self-provisioned agent in the Pending state:
+// it exists but cannot authenticate until a human validates it (ValidateAgent).
+// This is the human-in-the-loop-at-birth gate on self-provisioning.
+func (svc *Service) CreateAgentPending(ctx context.Context, orgID, displayName, responsibleHuman string, pub ed25519.PublicKey) (store.User, error) {
+	return svc.createAgent(ctx, orgID, displayName, responsibleHuman, pub, store.StatusPending)
+}
+
+func (svc *Service) createAgent(ctx context.Context, orgID, displayName, responsibleHuman string, pub ed25519.PublicKey, status store.Status) (store.User, error) {
 	if displayName == "" {
 		return store.User{}, errors.New("identity: display name required")
 	}
@@ -75,10 +87,32 @@ func (svc *Service) CreateAgent(ctx context.Context, orgID, displayName, respons
 		OrgID:             orgID,
 		Kind:              store.KindAgent,
 		DisplayName:       displayName,
+		Status:            status,
 		CasketPubkey:      []byte(pub),
 		CasketFingerprint: Fingerprint(pub),
 		ResponsibleHuman:  responsibleHuman,
 	})
+}
+
+// ValidateAgent flips a pending agent to active. validatingHuman MUST be the
+// agent's responsible human (only the human who answers for the agent may
+// ratify it). No-op-safe on an already-active agent. This is the
+// human-in-the-loop-at-birth gate.
+func (svc *Service) ValidateAgent(ctx context.Context, agentID, validatingHuman string) error {
+	agent, err := svc.store.GetUser(ctx, agentID)
+	if err != nil {
+		return fmt.Errorf("identity.ValidateAgent: %w", err)
+	}
+	if agent.Kind != store.KindAgent {
+		return errors.New("identity.ValidateAgent: not an agent")
+	}
+	if agent.ResponsibleHuman != validatingHuman {
+		return errors.New("identity.ValidateAgent: only the responsible human may validate this agent")
+	}
+	if agent.Status == store.StatusBlocked {
+		return errors.New("identity.ValidateAgent: agent is blocked")
+	}
+	return svc.store.SetUserStatus(ctx, agentID, store.StatusActive)
 }
 
 // GetUser returns a user by id.
