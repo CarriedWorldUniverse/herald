@@ -31,6 +31,7 @@ type Identity struct {
 	Org              string   // tenant org id
 	ResponsibleHuman string   // for agents: the human who answers for it (act.sub)
 	Scopes           []string // granted capabilities
+	Products         []string // CWB products enabled for the org
 	AgentFP          string   // casket fingerprint of the agent (if any)
 	HumanFP          string   // casket fingerprint of the responsible human (if any)
 }
@@ -154,6 +155,7 @@ func (v *Verifier) Verify(ctx context.Context, token string) (Identity, error) {
 	if c.Scope != "" {
 		id.Scopes = strings.Fields(c.Scope)
 	}
+	id.Products = c.Products
 	return id, nil
 }
 
@@ -217,8 +219,9 @@ type tokenClaims struct {
 	Subject string `json:"sub"`
 	Kind    string `json:"kind"`
 	Org     string `json:"org"`
-	Scope   string `json:"scope"`
-	AgentFP string `json:"agent_fp"`
+	Scope    string   `json:"scope"`
+	Products []string `json:"products"`
+	AgentFP  string   `json:"agent_fp"`
 	HumanFP string `json:"human_fp"`
 	Expiry  int64  `json:"exp"`
 	Act     *struct {
