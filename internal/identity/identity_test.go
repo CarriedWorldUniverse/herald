@@ -158,6 +158,30 @@ func TestEffectiveScopes(t *testing.T) {
 	}
 }
 
+func TestCreateAgent_DuplicatePubkeyRejected(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer s.Close()
+	svc := identity.New(s)
+	org, _ := s.CreateOrg(ctx, "acme")
+	human, _ := svc.CreateHuman(ctx, org.ID, "alice")
+
+	_, pub, _ := casket.DeriveAgentKey([]byte("owner-seed-32-bytes-padded-xxxxx"), "builder")
+	if _, err := svc.CreateAgent(ctx, org.ID, "builder", human.ID, pub); err != nil {
+		t.Fatalf("first agent: %v", err)
+	}
+	if _, err := svc.CreateAgent(ctx, org.ID, "builder2", human.ID, pub); !errors.Is(err, store.ErrDuplicateFingerprint) {
+		t.Fatalf("dup pubkey err = %v, want store.ErrDuplicateFingerprint", err)
+	}
+	_, pub2, _ := casket.DeriveAgentKey([]byte("owner-seed-32-bytes-padded-xxxxx"), "reader")
+	if _, err := svc.CreateAgent(ctx, org.ID, "reader", human.ID, pub2); err != nil {
+		t.Fatalf("distinct pubkey: %v", err)
+	}
+}
+
 func TestHumanPassword(t *testing.T) {
 	ctx := context.Background()
 	s, err := store.Open(":memory:")

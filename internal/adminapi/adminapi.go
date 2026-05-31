@@ -285,6 +285,10 @@ func (a *API) createAgent(w http.ResponseWriter, ctx context.Context, orgID, res
 	}
 	agent, err := create(ctx, orgID, body.DisplayName, responsibleHuman, pub)
 	if err != nil {
+		if errors.Is(err, store.ErrDuplicateFingerprint) {
+			writeErr(w, http.StatusConflict, "casket pubkey already registered")
+			return
+		}
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}

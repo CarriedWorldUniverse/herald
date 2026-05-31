@@ -142,3 +142,35 @@ func TestSQLite_StatusAndNotFound(t *testing.T) {
 		t.Fatalf("expected ErrNotFound, got %v", err)
 	}
 }
+
+func TestCreateUser_DuplicateCasketFingerprintRejected(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+	org, err := s.CreateOrg(ctx, "acme")
+	if err != nil {
+		t.Fatalf("CreateOrg: %v", err)
+	}
+	if _, err := s.CreateUser(ctx, store.User{OrgID: org.ID, Kind: store.KindAgent, DisplayName: "a1",
+		CasketFingerprint: "fp-AAA", CasketPubkey: []byte("pub-aaa")}); err != nil {
+		t.Fatalf("first agent: %v", err)
+	}
+	_, err = s.CreateUser(ctx, store.User{OrgID: org.ID, Kind: store.KindAgent, DisplayName: "a2",
+		CasketFingerprint: "fp-AAA", CasketPubkey: []byte("pub-aaa2")})
+	if !errors.Is(err, store.ErrDuplicateFingerprint) {
+		t.Fatalf("dup fingerprint err = %v, want ErrDuplicateFingerprint", err)
+	}
+	if _, err := s.CreateUser(ctx, store.User{OrgID: org.ID, Kind: store.KindAgent, DisplayName: "a3",
+		CasketFingerprint: "fp-BBB", CasketPubkey: []byte("pub-bbb")}); err != nil {
+		t.Fatalf("distinct fingerprint: %v", err)
+	}
+	if _, err := s.CreateUser(ctx, store.User{OrgID: org.ID, Kind: store.KindHuman, DisplayName: "h1"}); err != nil {
+		t.Fatalf("human 1: %v", err)
+	}
+	if _, err := s.CreateUser(ctx, store.User{OrgID: org.ID, Kind: store.KindHuman, DisplayName: "h2"}); err != nil {
+		t.Fatalf("human 2: %v", err)
+	}
+}

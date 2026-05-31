@@ -35,6 +35,10 @@ const (
 // ErrNotFound is returned by Get* when no row matches.
 var ErrNotFound = errors.New("store: not found")
 
+// ErrDuplicateFingerprint is returned when an agent registration would reuse a
+// casket fingerprint already bound to another agent. A casket key = one agent.
+var ErrDuplicateFingerprint = errors.New("store: casket fingerprint already registered")
+
 // Org is a tenant + accountability root. Flat for MVP (no manager tree).
 type Org struct {
 	ID        string

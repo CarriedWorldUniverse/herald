@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,6 +20,8 @@ import (
 	herald "github.com/CarriedWorldUniverse/herald/internal/oidc"
 	"github.com/CarriedWorldUniverse/herald/internal/store"
 )
+
+var liveHeraldSeq atomic.Int64
 
 // liveHerald spins a real herald (provider + identity + agent grant) and
 // returns the server + a minted agent token, so heraldauth verifies against a
@@ -33,8 +37,12 @@ func liveHerald(t *testing.T) (issuer string, agentToken, agentID, humanID, orgI
 	ctx := context.Background()
 	org, _ := svc.CreateOrg(ctx, "acme")
 	h, _ := svc.CreateHuman(ctx, org.ID, "jacinta")
-	priv, pub, _ := casket.DeriveAgentKey([]byte("owner-seed-32-bytes-padded-xxxxx"), "anvil")
-	a, _ := svc.CreateAgent(ctx, org.ID, "anvil", h.ID, pub)
+	slug := fmt.Sprintf("anvil-%d", liveHeraldSeq.Add(1))
+	priv, pub, _ := casket.DeriveAgentKey([]byte("owner-seed-32-bytes-padded-xxxxx"), slug)
+	a, err := svc.CreateAgent(ctx, org.ID, slug, h.ID, pub)
+	if err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
 	_ = svc.GrantScope(ctx, a.ID, "repo:write", h.ID)
 
 	_, signKey, _ := ed25519.GenerateKey(nil)
