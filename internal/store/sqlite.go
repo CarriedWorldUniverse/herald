@@ -6,6 +6,7 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
@@ -90,6 +91,9 @@ func (s *SQLite) CreateUser(ctx context.Context, u User) (User, error) {
 		u.ID, u.OrgID, string(u.Kind), u.DisplayName, string(u.Status),
 		nullStr(u.LoginSecret), nullBytes(u.CasketPubkey), nullStr(u.CasketFingerprint), nullStr(u.ResponsibleHuman))
 	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed: user.casket_fingerprint") {
+			return User{}, ErrDuplicateFingerprint
+		}
 		return User{}, fmt.Errorf("CreateUser: %w", err)
 	}
 	return s.GetUser(ctx, u.ID)

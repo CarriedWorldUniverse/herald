@@ -24,6 +24,11 @@ CREATE TABLE IF NOT EXISTS user (
 CREATE INDEX IF NOT EXISTS idx_user_org ON user(org_id);
 CREATE INDEX IF NOT EXISTS idx_user_responsible ON user(responsible_human);
 CREATE INDEX IF NOT EXISTS idx_user_fingerprint ON user(casket_fingerprint);
+-- A casket key is a global identity: at most one agent per fingerprint.
+-- Partial (non-empty) so scopeless humans (NULL/empty fingerprint) are exempt.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_user_fingerprint_uniq
+  ON user(casket_fingerprint)
+  WHERE casket_fingerprint IS NOT NULL AND casket_fingerprint != '';
 
 CREATE TABLE IF NOT EXISTS scope_grant (
   id         TEXT PRIMARY KEY,                   -- uuid
