@@ -81,6 +81,12 @@ type Store interface {
 	// Orgs.
 	CreateOrg(ctx context.Context, name string) (Org, error)
 	GetOrg(ctx context.Context, id string) (Org, error)
+	// DeleteOrg removes an org and ALL its rows (users, their scope grants,
+	// product overrides) in one transaction. Idempotent: an absent org is a
+	// no-op (no error).
+	DeleteOrg(ctx context.Context, id string) error
+	// ListOrgs returns every org (id, name, status).
+	ListOrgs(ctx context.Context) ([]Org, error)
 
 	// Users. CreateUser assigns an ID if the passed User.ID is empty and
 	// persists the row as-is (validation is the identity layer's job).

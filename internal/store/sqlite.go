@@ -246,6 +246,58 @@ func mustAffect(res sql.Result) error {
 	return nil
 }
 
+func (s *SQLite) DeleteOrg(ctx context.Context, id string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("DeleteOrg: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Defer FK enforcement to COMMIT so intra-org self-references
+	// (user.responsible_human, scope_grant.granted_by) don't fail mid-delete.
+	// No-op when foreign_keys is off (e.g. :memory: tests).
+	if _, err := tx.ExecContext(ctx, `PRAGMA defer_foreign_keys = ON`); err != nil {
+		return fmt.Errorf("DeleteOrg: defer fk: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM scope_grant WHERE user_id IN (SELECT id FROM user WHERE org_id=?)
+		    OR granted_by IN (SELECT id FROM user WHERE org_id=?)`, id, id); err != nil {
+		return fmt.Errorf("DeleteOrg: scope_grant: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM org_product WHERE org_id=?`, id); err != nil {
+		return fmt.Errorf("DeleteOrg: org_product: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM user WHERE org_id=?`, id); err != nil {
+		return fmt.Errorf("DeleteOrg: user: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM org WHERE id=?`, id); err != nil {
+		return fmt.Errorf("DeleteOrg: org: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("DeleteOrg: commit: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLite) ListOrgs(ctx context.Context) ([]Org, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, status, created_at FROM org ORDER BY created_at`)
+	if err != nil {
+		return nil, fmt.Errorf("ListOrgs: %w", err)
+	}
+	defer rows.Close()
+	var out []Org
+	for rows.Next() {
+		var o Org
+		var status string
+		if err := rows.Scan(&o.ID, &o.Name, &status, &o.CreatedAt); err != nil {
+			return nil, fmt.Errorf("ListOrgs scan: %w", err)
+		}
+		o.Status = Status(status)
+		out = append(out, o)
+	}
+	return out, rows.Err()
+}
+
 func (s *SQLite) SetProductEnabled(ctx context.Context, orgID, product string, enabled bool) error {
 	e := 0
 	if enabled {
