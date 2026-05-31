@@ -25,6 +25,7 @@ type IdentityResolver interface {
 	GetUser(ctx context.Context, id string) (store.User, error)
 	EffectiveScopes(ctx context.Context, userID string) ([]string, error)
 	IsActive(ctx context.Context, id string) bool
+	EnabledProducts(ctx context.Context, orgID string) ([]string, error)
 }
 
 // AgentGrant implements the casket jwt-bearer token endpoint: an agent signs a
@@ -128,11 +129,16 @@ func (g *AgentGrant) issue(ctx context.Context, assertion, tokenURL string) (str
 	if err != nil {
 		return "", fmt.Errorf("scopes: %w", err)
 	}
+	products, err := g.id.EnabledProducts(ctx, agent.OrgID)
+	if err != nil {
+		return "", fmt.Errorf("products: %w", err)
+	}
 	out := map[string]any{
 		"sub":      agent.ID,
 		"kind":     string(store.KindAgent),
 		"org":      agent.OrgID,
 		"scope":    strings.Join(scopes, " "),
+		"products": products,
 		"agent_fp": agent.CasketFingerprint,
 	}
 	if agent.ResponsibleHuman != "" {

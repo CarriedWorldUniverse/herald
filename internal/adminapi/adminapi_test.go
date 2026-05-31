@@ -421,6 +421,76 @@ func TestSelfProvisionAgent_DuplicatePubkey_409(t *testing.T) {
 	}
 }
 
+func TestAdminProducts_GetEnableDisable(t *testing.T) {
+	_, _, srv := newStack(t)
+
+	// Create org.
+	resp, org := adminPost(t, srv.URL+"/api/orgs", map[string]any{"name": "acme"})
+	if resp.StatusCode != 200 {
+		t.Fatalf("create org: %d %+v", resp.StatusCode, org)
+	}
+	orgID, _ := org["id"].(string)
+
+	// Default products — all enabled.
+	resp, body := doJSON(t, "GET", srv.URL+"/api/orgs/"+orgID+"/products", adminToken, nil)
+	if resp.StatusCode != 200 || body["cairn"] != true || body["ledger"] != true || body["commonplace"] != true {
+		t.Fatalf("default products GET = %d %+v", resp.StatusCode, body)
+	}
+
+	// Disable cairn.
+	resp, body = doJSON(t, "POST", srv.URL+"/api/orgs/"+orgID+"/products/cairn/disable", adminToken, nil)
+	if resp.StatusCode != 200 || body["cairn"] != false {
+		t.Fatalf("disable cairn = %d %+v", resp.StatusCode, body)
+	}
+
+	// Disable cairn again — idempotent.
+	resp, _ = doJSON(t, "POST", srv.URL+"/api/orgs/"+orgID+"/products/cairn/disable", adminToken, nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("disable cairn (again) = %d, want 200 (idempotent)", resp.StatusCode)
+	}
+
+	// Re-enable cairn.
+	resp, body = doJSON(t, "POST", srv.URL+"/api/orgs/"+orgID+"/products/cairn/enable", adminToken, nil)
+	if resp.StatusCode != 200 || body["cairn"] != true {
+		t.Fatalf("enable cairn = %d %+v", resp.StatusCode, body)
+	}
+
+	// Unknown product -> 400.
+	resp, _ = doJSON(t, "POST", srv.URL+"/api/orgs/"+orgID+"/products/bogus/disable", adminToken, nil)
+	if resp.StatusCode != 400 {
+		t.Fatalf("unknown product = %d, want 400", resp.StatusCode)
+	}
+
+	// Unknown org -> 404.
+	resp, _ = doJSON(t, "POST", srv.URL+"/api/orgs/no-such/products/cairn/disable", adminToken, nil)
+	if resp.StatusCode != 404 {
+		t.Fatalf("unknown org = %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestAdminCreateOrg_WithProducts(t *testing.T) {
+	_, _, srv := newStack(t)
+
+	// Create org with only cairn enabled.
+	resp, body := doJSON(t, "POST", srv.URL+"/api/orgs", adminToken, map[string]any{"name": "acme", "products": []string{"cairn"}})
+	if resp.StatusCode != 200 {
+		t.Fatalf("create org = %d %+v", resp.StatusCode, body)
+	}
+	orgID, _ := body["id"].(string)
+
+	// Products map should show cairn=true, ledger=false, commonplace=false.
+	resp, m := doJSON(t, "GET", srv.URL+"/api/orgs/"+orgID+"/products", adminToken, nil)
+	if resp.StatusCode != 200 || m["cairn"] != true || m["ledger"] != false || m["commonplace"] != false {
+		t.Fatalf("subset products = %d %+v", resp.StatusCode, m)
+	}
+
+	// Create with unknown product -> 400, no org created.
+	resp, _ = doJSON(t, "POST", srv.URL+"/api/orgs", adminToken, map[string]any{"name": "x", "products": []string{"bogus"}})
+	if resp.StatusCode != 400 {
+		t.Fatalf("create with bogus product = %d, want 400", resp.StatusCode)
+	}
+}
+
 func TestAgentByFingerprint(t *testing.T) {
 	_, _, srv := newStack(t)
 

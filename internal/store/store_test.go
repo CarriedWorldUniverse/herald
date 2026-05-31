@@ -143,6 +143,58 @@ func TestSQLite_StatusAndNotFound(t *testing.T) {
 	}
 }
 
+func TestProductEntitlement_DenyList(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	org, err := s.CreateOrg(ctx, "acme")
+	if err != nil {
+		t.Fatalf("CreateOrg: %v", err)
+	}
+
+	// Default: no rows → every product enabled.
+	if ok, err := s.IsProductEnabled(ctx, org.ID, "cairn"); err != nil || !ok {
+		t.Fatalf("default cairn enabled = %v,%v want true,nil", ok, err)
+	}
+
+	// Disable → false; other products unaffected.
+	if err := s.SetProductEnabled(ctx, org.ID, "cairn", false); err != nil {
+		t.Fatalf("SetProductEnabled false: %v", err)
+	}
+	if ok, _ := s.IsProductEnabled(ctx, org.ID, "cairn"); ok {
+		t.Fatalf("cairn should be disabled")
+	}
+	if ok, _ := s.IsProductEnabled(ctx, org.ID, "ledger"); !ok {
+		t.Fatalf("ledger should still be enabled (deny-list)")
+	}
+
+	// Re-enable (idempotent upsert).
+	if err := s.SetProductEnabled(ctx, org.ID, "cairn", true); err != nil {
+		t.Fatalf("SetProductEnabled true: %v", err)
+	}
+	if ok, _ := s.IsProductEnabled(ctx, org.ID, "cairn"); !ok {
+		t.Fatalf("cairn should be enabled after re-enable")
+	}
+
+	// Overrides reflect only rows that exist.
+	if err := s.SetProductEnabled(ctx, org.ID, "ledger", false); err != nil {
+		t.Fatalf("disable ledger: %v", err)
+	}
+	ov, err := s.ListProductOverrides(ctx, org.ID)
+	if err != nil {
+		t.Fatalf("ListProductOverrides: %v", err)
+	}
+	if ov["cairn"] != true || ov["ledger"] != false {
+		t.Fatalf("overrides = %+v, want cairn:true ledger:false", ov)
+	}
+	if _, present := ov["commonplace"]; present {
+		t.Fatalf("commonplace has no row; must not appear in overrides")
+	}
+}
+
 func TestCreateUser_DuplicateCasketFingerprintRejected(t *testing.T) {
 	ctx := context.Background()
 	s, err := store.Open(":memory:")

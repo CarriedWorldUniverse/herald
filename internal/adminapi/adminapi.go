@@ -21,6 +21,7 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/CarriedWorldUniverse/herald/internal/identity"
 	"github.com/CarriedWorldUniverse/herald/internal/store"
 )
 
@@ -30,6 +31,7 @@ const ScopeAgentCreate = "agent:create"
 // Identity is the subset of identity.Service adminapi needs.
 type Identity interface {
 	CreateOrg(ctx context.Context, name string) (store.Org, error)
+	CreateOrgWithProducts(ctx context.Context, name string, products []string) (store.Org, error)
 	CreateHuman(ctx context.Context, orgID, displayName string) (store.User, error)
 	CreateAgent(ctx context.Context, orgID, displayName, responsibleHuman string, pub ed25519.PublicKey) (store.User, error)
 	CreateAgentPending(ctx context.Context, orgID, displayName, responsibleHuman string, pub ed25519.PublicKey) (store.User, error)
@@ -37,8 +39,12 @@ type Identity interface {
 	GrantScope(ctx context.Context, userID, scope, grantedBy string) error
 	SetHumanPassword(ctx context.Context, userID, plaintext string) error
 	GetUser(ctx context.Context, id string) (store.User, error)
+	GetOrg(ctx context.Context, orgID string) (store.Org, error)
 	GetAgentByFingerprint(ctx context.Context, fp string) (store.User, error)
 	EffectiveScopes(ctx context.Context, userID string) ([]string, error)
+	Products(ctx context.Context, orgID string) (map[string]bool, error)
+	EnableProduct(ctx context.Context, orgID, product string) error
+	DisableProduct(ctx context.Context, orgID, product string) error
 }
 
 // TokenIssuer verifies herald tokens and signs new ones. The provider
@@ -70,6 +76,9 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("POST /api/orgs", a.adminOnly(a.handleCreateOrg))
 	mux.HandleFunc("POST /api/orgs/{org}/humans", a.adminOnly(a.handleCreateHuman))
 	mux.HandleFunc("POST /api/orgs/{org}/agents", a.adminOnly(a.handleAdminCreateAgent))
+	mux.HandleFunc("GET /api/orgs/{org}/products", a.adminOnly(a.handleListProducts))
+	mux.HandleFunc("POST /api/orgs/{org}/products/{product}/enable", a.adminOnly(a.handleEnableProduct))
+	mux.HandleFunc("POST /api/orgs/{org}/products/{product}/disable", a.adminOnly(a.handleDisableProduct))
 	// NEX-412: resolve an agent by its casket fingerprint — cairn's SSH ingress
 	// maps an incoming pubkey to a herald agent. NOT admin-gated: this is an
 	// in-cluster SERVICE lookup (cairn → herald.cwb.svc), reached without the
@@ -94,17 +103,67 @@ func (a *API) Handler() http.Handler {
 
 func (a *API) handleCreateOrg(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Name string `json:"name"`
+		Name     string   `json:"name"`
+		Products []string `json:"products"`
 	}
 	if !decode(w, r, &body) {
 		return
 	}
-	org, err := a.id.CreateOrg(r.Context(), body.Name)
+	org, err := a.id.CreateOrgWithProducts(r.Context(), body.Name, body.Products)
 	if err != nil {
+		if errors.Is(err, identity.ErrUnknownProduct) {
+			writeErr(w, http.StatusBadRequest, "unknown product")
+			return
+		}
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"id": org.ID, "name": org.Name})
+}
+
+func (a *API) handleListProducts(w http.ResponseWriter, r *http.Request) {
+	orgID := r.PathValue("org")
+	if _, err := a.id.GetOrg(r.Context(), orgID); err != nil {
+		writeErr(w, http.StatusNotFound, "org not found")
+		return
+	}
+	m, err := a.id.Products(r.Context(), orgID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "products lookup failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, m)
+}
+
+func (a *API) handleEnableProduct(w http.ResponseWriter, r *http.Request)  { a.setProduct(w, r, true) }
+func (a *API) handleDisableProduct(w http.ResponseWriter, r *http.Request) { a.setProduct(w, r, false) }
+
+func (a *API) setProduct(w http.ResponseWriter, r *http.Request, enabled bool) {
+	orgID := r.PathValue("org")
+	product := r.PathValue("product")
+	var err error
+	if enabled {
+		err = a.id.EnableProduct(r.Context(), orgID, product)
+	} else {
+		err = a.id.DisableProduct(r.Context(), orgID, product)
+	}
+	switch {
+	case errors.Is(err, identity.ErrUnknownProduct):
+		writeErr(w, http.StatusBadRequest, "unknown product")
+		return
+	case errors.Is(err, store.ErrNotFound):
+		writeErr(w, http.StatusNotFound, "org not found")
+		return
+	case err != nil:
+		writeErr(w, http.StatusInternalServerError, "set product failed")
+		return
+	}
+	m, err := a.id.Products(r.Context(), orgID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "products lookup failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, m)
 }
 
 func (a *API) handleCreateHuman(w http.ResponseWriter, r *http.Request) {

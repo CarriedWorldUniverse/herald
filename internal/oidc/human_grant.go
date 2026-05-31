@@ -17,6 +17,7 @@ const passwordGrant = "password"
 type HumanResolver interface {
 	VerifyHumanPassword(ctx context.Context, userID, plaintext string) (store.User, error)
 	EffectiveScopes(ctx context.Context, userID string) ([]string, error)
+	EnabledProducts(ctx context.Context, orgID string) ([]string, error)
 }
 
 // HumanGrant implements the password token endpoint: a human presents their
@@ -54,11 +55,17 @@ func (g *HumanGrant) ServeToken(w http.ResponseWriter, r *http.Request) {
 		oauthError(w, http.StatusUnauthorized, "invalid_grant", "login rejected")
 		return
 	}
+	products, err := g.id.EnabledProducts(r.Context(), u.OrgID)
+	if err != nil {
+		oauthError(w, http.StatusUnauthorized, "invalid_grant", "login rejected")
+		return
+	}
 	tok, err := g.p.SignToken(map[string]any{
-		"sub":   u.ID,
-		"kind":  string(store.KindHuman),
-		"org":   u.OrgID,
-		"scope": strings.Join(scopes, " "),
+		"sub":      u.ID,
+		"kind":     string(store.KindHuman),
+		"org":      u.OrgID,
+		"scope":    strings.Join(scopes, " "),
+		"products": products,
 	})
 	if err != nil {
 		oauthError(w, http.StatusInternalServerError, "server_error", "token signing failed")

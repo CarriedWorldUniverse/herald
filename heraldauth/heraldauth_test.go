@@ -155,6 +155,28 @@ func TestVerifier_JWKSURLOverride_BypassesDiscovery(t *testing.T) {
 	}
 }
 
+func TestVerifier_ParsesProductsClaim(t *testing.T) {
+	issuer, tok, _, _, _ := liveHerald(t)
+	v, err := heraldauth.New(context.Background(), heraldauth.Config{Issuer: issuer})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	id, err := v.Verify(context.Background(), tok)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	want := map[string]bool{"cairn": true, "ledger": true, "commonplace": true}
+	got := map[string]bool{}
+	for _, p := range id.Products {
+		got[p] = true
+	}
+	for p := range want {
+		if !got[p] {
+			t.Fatalf("Products = %v, missing %s", id.Products, p)
+		}
+	}
+}
+
 // JWKSURL override means a wrong/unreachable discovery URL is no problem —
 // the issuer string is only used for the `iss` claim check.
 func TestVerifier_JWKSURLOverride_IgnoresDiscovery(t *testing.T) {

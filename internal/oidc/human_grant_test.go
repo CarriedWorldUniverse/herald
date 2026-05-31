@@ -96,6 +96,32 @@ func postToken(t *testing.T, base string, form url.Values, wantStatus int) strin
 	return out.AccessToken
 }
 
+func TestHumanGrant_ProductsClaim(t *testing.T) {
+	ctx := context.Background()
+	svc, srv, orgID := humanStack(t)
+
+	h, err := svc.CreateHuman(ctx, orgID, "alice")
+	if err != nil {
+		t.Fatalf("CreateHuman: %v", err)
+	}
+	if err := svc.SetHumanPassword(ctx, h.ID, "hunter2hunter2"); err != nil {
+		t.Fatalf("SetHumanPassword: %v", err)
+	}
+
+	// Disable ledger so the products claim should be [cairn, commonplace].
+	if err := svc.DisableProduct(ctx, orgID, identity.ProductLedger); err != nil {
+		t.Fatalf("DisableProduct: %v", err)
+	}
+
+	tok := postToken(t, srv.URL, url.Values{
+		"grant_type": {"password"}, "username": {h.ID}, "password": {"hunter2hunter2"},
+	}, http.StatusOK)
+	claims := decodeJWT(t, tok)
+	if got := joinStrs(toStringSlice(claims["products"])); got != "cairn,commonplace" {
+		t.Fatalf("products = %q, want \"cairn,commonplace\"", got)
+	}
+}
+
 func decodeJWT(t *testing.T, tok string) map[string]any {
 	t.Helper()
 	parts := strings.Split(tok, ".")
