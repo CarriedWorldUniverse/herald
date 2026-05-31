@@ -23,10 +23,13 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/CarriedWorldUniverse/herald/internal/adminapi"
 	"github.com/CarriedWorldUniverse/herald/internal/identity"
 	"github.com/CarriedWorldUniverse/herald/internal/oidc"
+	"github.com/CarriedWorldUniverse/herald/internal/purge"
 	"github.com/CarriedWorldUniverse/herald/internal/store"
 )
 
@@ -61,7 +64,13 @@ func main() {
 		oidc.NewHumanGrant(provider, idsvc),
 	))
 
-	api := adminapi.New(idsvc, provider, adminToken)
+	gatewayBase := os.Getenv("HERALD_GATEWAY_URL")
+	if gatewayBase == "" {
+		gatewayBase = strings.TrimSuffix(strings.TrimRight(issuer, "/")+"/", "/herald/")
+	}
+	purger := purge.New(gatewayBase, &http.Client{Timeout: 30 * time.Second})
+
+	api := adminapi.New(idsvc, provider, adminToken, purger)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
