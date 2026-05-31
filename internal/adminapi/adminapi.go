@@ -36,6 +36,7 @@ type Identity interface {
 	ValidateAgent(ctx context.Context, agentID, validatingHuman string) error
 	GrantScope(ctx context.Context, userID, scope, grantedBy string) error
 	GetUser(ctx context.Context, id string) (store.User, error)
+	GetAgentByFingerprint(ctx context.Context, fp string) (store.User, error)
 	EffectiveScopes(ctx context.Context, userID string) ([]string, error)
 }
 
@@ -68,6 +69,9 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("POST /api/orgs", a.adminOnly(a.handleCreateOrg))
 	mux.HandleFunc("POST /api/orgs/{org}/humans", a.adminOnly(a.handleCreateHuman))
 	mux.HandleFunc("POST /api/orgs/{org}/agents", a.adminOnly(a.handleAdminCreateAgent))
+	// NEX-412: resolve an agent by its casket fingerprint — cairn's SSH ingress
+	// maps an incoming pubkey to a herald agent. Admin-gated read.
+	mux.HandleFunc("GET /api/agents/by-fingerprint/{fp}", a.adminOnly(a.handleAgentByFingerprint))
 	// MVP human "login" stand-in: admin mints a human token. Full passkey/
 	// password login is deferred (spec §9); this gives humans a token so they
 	// can validate agents + self-provision now.
@@ -263,6 +267,42 @@ func (a *API) createAgent(w http.ResponseWriter, ctx context.Context, orgID, res
 		"fingerprint":       agent.CasketFingerprint,
 		"status":            string(agent.Status),
 		"scopes":            body.Scopes,
+	})
+}
+
+// handleAgentByFingerprint resolves an agent from its casket fingerprint
+// (NEX-412). cairn's SSH ingress computes the fingerprint of an incoming
+// public key and asks herald "which agent is this?". Returns the agent
+// projection + effective scopes; 404 if no agent has that fingerprint.
+func (a *API) handleAgentByFingerprint(w http.ResponseWriter, r *http.Request) {
+	fp := r.PathValue("fp")
+	if fp == "" {
+		writeErr(w, http.StatusBadRequest, "fingerprint required")
+		return
+	}
+	agent, err := a.id.GetAgentByFingerprint(r.Context(), fp)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "no agent for fingerprint")
+		return
+	}
+	if agent.Kind != store.KindAgent {
+		writeErr(w, http.StatusNotFound, "no agent for fingerprint")
+		return
+	}
+	scopes, err := a.id.EffectiveScopes(r.Context(), agent.ID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "scopes lookup failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":                agent.ID,
+		"kind":              string(agent.Kind),
+		"display_name":      agent.DisplayName,
+		"org":               agent.OrgID,
+		"responsible_human": agent.ResponsibleHuman,
+		"fingerprint":       agent.CasketFingerprint,
+		"status":            string(agent.Status),
+		"scopes":            scopes,
 	})
 }
 

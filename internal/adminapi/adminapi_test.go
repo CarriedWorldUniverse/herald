@@ -292,3 +292,59 @@ func adminPost(t *testing.T, url string, body any) (*http.Response, map[string]a
 	t.Helper()
 	return doJSON(t, "POST", url, adminToken, body)
 }
+
+func TestAgentByFingerprint(t *testing.T) {
+	_, _, srv := newStack(t)
+
+	_, org := adminPost(t, srv.URL+"/api/orgs", map[string]any{"name": "acme"})
+	orgID, _ := org["id"].(string)
+	_, human := adminPost(t, srv.URL+"/api/orgs/"+orgID+"/humans", map[string]any{"display_name": "jacinta"})
+	humanID, _ := human["id"].(string)
+
+	_, pub, _ := casket.DeriveAgentKey([]byte("owner-seed-32-bytes-padded-xxxxx"), "anvil")
+	_, agent := adminPost(t, srv.URL+"/api/orgs/"+orgID+"/agents", map[string]any{
+		"display_name":      "anvil",
+		"responsible_human": humanID,
+		"casket_pubkey":     base64.StdEncoding.EncodeToString(pub),
+		"scopes":            []string{"repo:read", "repo:write"},
+	})
+	agentID, _ := agent["id"].(string)
+	fp, _ := agent["fingerprint"].(string)
+	if fp == "" {
+		t.Fatalf("agent create returned no fingerprint: %+v", agent)
+	}
+
+	// Resolve by fingerprint (admin-gated GET).
+	resp, got := doJSON(t, "GET", srv.URL+"/api/agents/by-fingerprint/"+fp, adminToken, nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("by-fingerprint: %d %+v", resp.StatusCode, got)
+	}
+	if got["id"] != agentID {
+		t.Fatalf("id = %v, want %q", got["id"], agentID)
+	}
+	if got["kind"] != "agent" {
+		t.Fatalf("kind = %v, want agent", got["kind"])
+	}
+	if got["fingerprint"] != fp {
+		t.Fatalf("fingerprint = %v, want %q", got["fingerprint"], fp)
+	}
+	if got["responsible_human"] != humanID {
+		t.Fatalf("responsible_human = %v, want %q", got["responsible_human"], humanID)
+	}
+	scopes, _ := got["scopes"].([]any)
+	if len(scopes) != 2 {
+		t.Fatalf("scopes = %v, want repo:read + repo:write", got["scopes"])
+	}
+
+	// Unknown fingerprint -> 404.
+	resp, _ = doJSON(t, "GET", srv.URL+"/api/agents/by-fingerprint/nope-nope-nope", adminToken, nil)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("unknown fingerprint status = %d, want 404", resp.StatusCode)
+	}
+
+	// No admin token -> 401.
+	resp, _ = doJSON(t, "GET", srv.URL+"/api/agents/by-fingerprint/"+fp, "", nil)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("no-token status = %d, want 401", resp.StatusCode)
+	}
+}
