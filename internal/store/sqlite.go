@@ -128,6 +128,15 @@ func (s *SQLite) SetUserStatus(ctx context.Context, id string, st Status) error 
 	return mustAffect(res)
 }
 
+// SetLoginSecret stores a human's password hash (bcrypt) in login_secret.
+func (s *SQLite) SetLoginSecret(ctx context.Context, id, hash string) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE user SET login_secret = ? WHERE id = ?`, hash, id)
+	if err != nil {
+		return fmt.Errorf("SetLoginSecret: %w", err)
+	}
+	return mustAffect(res)
+}
+
 func (s *SQLite) SetOrgStatus(ctx context.Context, id string, st Status) error {
 	res, err := s.db.ExecContext(ctx, `UPDATE org SET status = ? WHERE id = ?`, string(st), id)
 	if err != nil {

@@ -56,7 +56,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("herald: provider: %v", err)
 	}
-	provider.SetTokenHandler(oidc.NewAgentGrant(provider, idsvc))
+	provider.SetTokenHandler(oidc.NewGrantMux(
+		oidc.NewAgentGrant(provider, idsvc),
+		oidc.NewHumanGrant(provider, idsvc),
+	))
 
 	api := adminapi.New(idsvc, provider, adminToken)
 

@@ -35,6 +35,7 @@ type Identity interface {
 	CreateAgentPending(ctx context.Context, orgID, displayName, responsibleHuman string, pub ed25519.PublicKey) (store.User, error)
 	ValidateAgent(ctx context.Context, agentID, validatingHuman string) error
 	GrantScope(ctx context.Context, userID, scope, grantedBy string) error
+	SetHumanPassword(ctx context.Context, userID, plaintext string) error
 	GetUser(ctx context.Context, id string) (store.User, error)
 	GetAgentByFingerprint(ctx context.Context, fp string) (store.User, error)
 	EffectiveScopes(ctx context.Context, userID string) ([]string, error)
@@ -81,6 +82,7 @@ func (a *API) Handler() http.Handler {
 	// password login is deferred (spec §9); this gives humans a token so they
 	// can validate agents + self-provision now.
 	mux.HandleFunc("POST /api/humans/{id}/token", a.adminOnly(a.handleIssueHumanToken))
+	mux.HandleFunc("POST /api/humans/{id}/password", a.adminOnly(a.handleSetHumanPassword))
 	// Self-provision tool (herald token, agent:create scope) — creates PENDING.
 	mux.HandleFunc("POST /api/agents", a.handleSelfProvisionAgent)
 	// Human validates a pending agent (human token; must be the responsible human).
@@ -108,7 +110,8 @@ func (a *API) handleCreateOrg(w http.ResponseWriter, r *http.Request) {
 func (a *API) handleCreateHuman(w http.ResponseWriter, r *http.Request) {
 	orgID := r.PathValue("org")
 	var body struct {
-		DisplayName string `json:"display_name"`
+		DisplayName string   `json:"display_name"`
+		Scopes      []string `json:"scopes"`
 	}
 	if !decode(w, r, &body) {
 		return
@@ -117,6 +120,12 @@ func (a *API) handleCreateHuman(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	for _, sc := range body.Scopes {
+		if err := a.id.GrantScope(r.Context(), h.ID, sc, h.ID); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"id": h.ID, "display_name": h.DisplayName, "org": h.OrgID})
 }
@@ -169,6 +178,27 @@ func (a *API) handleIssueHumanToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"access_token": tok, "token_type": "Bearer"})
+}
+
+// handleSetHumanPassword sets a human's login password (admin-gated). bcrypt
+// hashing lives in the identity layer.
+func (a *API) handleSetHumanPassword(w http.ResponseWriter, r *http.Request) {
+	humanID := r.PathValue("id")
+	var body struct {
+		Password string `json:"password"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	if len(body.Password) < 8 {
+		writeErr(w, http.StatusBadRequest, "password must be at least 8 characters")
+		return
+	}
+	if err := a.id.SetHumanPassword(r.Context(), humanID, body.Password); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{})
 }
 
 // --- self-provision tool ---

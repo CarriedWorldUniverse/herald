@@ -85,6 +85,7 @@ type Store interface {
 	GetUserByCasketFingerprint(ctx context.Context, fp string) (User, error)
 	ListAgentsByResponsibleHuman(ctx context.Context, humanID string) ([]User, error)
 	SetUserStatus(ctx context.Context, id string, s Status) error
+	SetLoginSecret(ctx context.Context, id, hash string) error
 	SetOrgStatus(ctx context.Context, id string, s Status) error
 
 	// Scopes.

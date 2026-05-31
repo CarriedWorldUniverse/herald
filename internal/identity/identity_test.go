@@ -2,6 +2,7 @@ package identity_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	casket "github.com/CarriedWorldUniverse/casket-go"
@@ -154,5 +155,41 @@ func TestEffectiveScopes(t *testing.T) {
 	}
 	if len(scopes) != 2 {
 		t.Fatalf("want 2 scopes, got %v", scopes)
+	}
+}
+
+func TestHumanPassword(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer s.Close()
+	svc := identity.New(s)
+
+	org, err := s.CreateOrg(ctx, "acme")
+	if err != nil {
+		t.Fatalf("CreateOrg: %v", err)
+	}
+	h, err := svc.CreateHuman(ctx, org.ID, "alice")
+	if err != nil {
+		t.Fatalf("CreateHuman: %v", err)
+	}
+
+	if err := svc.SetHumanPassword(ctx, h.ID, "correct-horse-battery"); err != nil {
+		t.Fatalf("SetHumanPassword: %v", err)
+	}
+	if _, err := svc.VerifyHumanPassword(ctx, h.ID, "correct-horse-battery"); err != nil {
+		t.Fatalf("verify correct password: %v", err)
+	}
+	if _, err := svc.VerifyHumanPassword(ctx, h.ID, "wrong"); !errors.Is(err, identity.ErrInvalidCredentials) {
+		t.Fatalf("verify wrong password err = %v, want ErrInvalidCredentials", err)
+	}
+	if _, err := svc.VerifyHumanPassword(ctx, "no-such-user", "x"); !errors.Is(err, identity.ErrInvalidCredentials) {
+		t.Fatalf("verify unknown user err = %v, want ErrInvalidCredentials", err)
+	}
+	h2, _ := svc.CreateHuman(ctx, org.ID, "bob")
+	if _, err := svc.VerifyHumanPassword(ctx, h2.ID, "anything"); !errors.Is(err, identity.ErrInvalidCredentials) {
+		t.Fatalf("verify no-password err = %v, want ErrInvalidCredentials", err)
 	}
 }

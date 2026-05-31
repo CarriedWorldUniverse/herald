@@ -17,6 +17,8 @@ import (
 	"errors"
 	"fmt"
 
+	"golang.org/x/crypto/bcrypt"
+
 	"github.com/CarriedWorldUniverse/herald/internal/store"
 )
 
@@ -27,6 +29,11 @@ type Service struct {
 
 // New constructs a Service.
 func New(s store.Store) *Service { return &Service{store: s} }
+
+// ErrInvalidCredentials is the single, uniform error every human-login failure
+// returns — unknown user, not a human, inactive, no password set, or wrong
+// password all look identical, so login leaks no user-enumeration signal.
+var ErrInvalidCredentials = errors.New("identity: invalid credentials")
 
 // CreateOrg creates a new org.
 func (svc *Service) CreateOrg(ctx context.Context, name string) (store.Org, error) {
@@ -151,6 +158,42 @@ func (svc *Service) BlockUser(ctx context.Context, id string) error {
 // UnblockUser restores a user to active.
 func (svc *Service) UnblockUser(ctx context.Context, id string) error {
 	return svc.store.SetUserStatus(ctx, id, store.StatusActive)
+}
+
+// SetHumanPassword bcrypt-hashes plaintext and stores it as the human's login
+// secret. Errors if the user is not a human.
+func (svc *Service) SetHumanPassword(ctx context.Context, userID, plaintext string) error {
+	u, err := svc.store.GetUser(ctx, userID)
+	if err != nil {
+		return err
+	}
+	if u.Kind != store.KindHuman {
+		return fmt.Errorf("identity.SetHumanPassword: user %s is not a human", userID)
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(plaintext), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("identity.SetHumanPassword: hash: %w", err)
+	}
+	return svc.store.SetLoginSecret(ctx, userID, string(hash))
+}
+
+// VerifyHumanPassword returns the user iff it is an active human whose stored
+// bcrypt hash matches plaintext. Every failure returns ErrInvalidCredentials.
+func (svc *Service) VerifyHumanPassword(ctx context.Context, userID, plaintext string) (store.User, error) {
+	u, err := svc.store.GetUser(ctx, userID)
+	if err != nil {
+		return store.User{}, ErrInvalidCredentials
+	}
+	if u.Kind != store.KindHuman || u.LoginSecret == "" {
+		return store.User{}, ErrInvalidCredentials
+	}
+	if !svc.IsActive(ctx, userID) {
+		return store.User{}, ErrInvalidCredentials
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(u.LoginSecret), []byte(plaintext)); err != nil {
+		return store.User{}, ErrInvalidCredentials
+	}
+	return u, nil
 }
 
 // IsActive reports whether the user may authenticate. An agent is active only
