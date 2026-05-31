@@ -70,8 +70,13 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("POST /api/orgs/{org}/humans", a.adminOnly(a.handleCreateHuman))
 	mux.HandleFunc("POST /api/orgs/{org}/agents", a.adminOnly(a.handleAdminCreateAgent))
 	// NEX-412: resolve an agent by its casket fingerprint — cairn's SSH ingress
-	// maps an incoming pubkey to a herald agent. Admin-gated read.
-	mux.HandleFunc("GET /api/agents/by-fingerprint/{fp}", a.adminOnly(a.handleAgentByFingerprint))
+	// maps an incoming pubkey to a herald agent. NOT admin-gated: this is an
+	// in-cluster SERVICE lookup (cairn → herald.cwb.svc), reached without the
+	// static admin token. It is NOT a gateway public-path, so external callers
+	// still hit the gateway's bearer-auth; only in-cluster services reach it
+	// unauthenticated (the intra-cluster-trust posture — tightened to mesh-mTLS
+	// / a scoped service token later). It returns only id/org/scopes/status.
+	mux.HandleFunc("GET /api/agents/by-fingerprint/{fp}", a.handleAgentByFingerprint)
 	// MVP human "login" stand-in: admin mints a human token. Full passkey/
 	// password login is deferred (spec §9); this gives humans a token so they
 	// can validate agents + self-provision now.
@@ -302,6 +307,7 @@ func (a *API) handleAgentByFingerprint(w http.ResponseWriter, r *http.Request) {
 		"responsible_human": agent.ResponsibleHuman,
 		"fingerprint":       agent.CasketFingerprint,
 		"status":            string(agent.Status),
+		"active":            agent.Status == store.StatusActive,
 		"scopes":            scopes,
 	})
 }

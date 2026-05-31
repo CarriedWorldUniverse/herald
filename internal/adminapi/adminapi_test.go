@@ -335,6 +335,9 @@ func TestAgentByFingerprint(t *testing.T) {
 	if len(scopes) != 2 {
 		t.Fatalf("scopes = %v, want repo:read + repo:write", got["scopes"])
 	}
+	if got["active"] != true {
+		t.Fatalf("active = %v, want true", got["active"])
+	}
 
 	// Unknown fingerprint -> 404.
 	resp, _ = doJSON(t, "GET", srv.URL+"/api/agents/by-fingerprint/nope-nope-nope", adminToken, nil)
@@ -342,9 +345,14 @@ func TestAgentByFingerprint(t *testing.T) {
 		t.Fatalf("unknown fingerprint status = %d, want 404", resp.StatusCode)
 	}
 
-	// No admin token -> 401.
+	// In-cluster service lookup: NOT admin-gated (cairn resolves a pubkey
+	// without the admin token). No-token still resolves — the network is the
+	// access control. It is NOT a gateway public-path, so external callers
+	// still hit the gateway's bearer auth; only in-cluster services reach
+	// this unauthenticated (intra-cluster-trust posture, tightened to mesh
+	// mTLS / a scoped service token later).
 	resp, _ = doJSON(t, "GET", srv.URL+"/api/agents/by-fingerprint/"+fp, "", nil)
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("no-token status = %d, want 401", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("no-token in-cluster lookup = %d, want 200", resp.StatusCode)
 	}
 }
