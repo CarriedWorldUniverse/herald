@@ -195,6 +195,64 @@ func TestProductEntitlement_DenyList(t *testing.T) {
 	}
 }
 
+func TestDeleteOrg_CascadesAndIsIdempotent(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+
+	org, _ := s.CreateOrg(ctx, "acme")
+	h, _ := s.CreateUser(ctx, store.User{OrgID: org.ID, Kind: store.KindHuman, DisplayName: "alice"})
+	a, _ := s.CreateUser(ctx, store.User{OrgID: org.ID, Kind: store.KindAgent, DisplayName: "builder", ResponsibleHuman: h.ID})
+	if _, err := s.GrantScope(ctx, a.ID, "repo:write", h.ID); err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	if err := s.SetProductEnabled(ctx, org.ID, "cairn", false); err != nil {
+		t.Fatalf("set product: %v", err)
+	}
+	other, _ := s.CreateOrg(ctx, "other")
+
+	if err := s.DeleteOrg(ctx, org.ID); err != nil {
+		t.Fatalf("DeleteOrg: %v", err)
+	}
+	if _, err := s.GetOrg(ctx, org.ID); err != store.ErrNotFound {
+		t.Fatalf("org should be gone, got %v", err)
+	}
+	if _, err := s.GetUser(ctx, a.ID); err != store.ErrNotFound {
+		t.Fatalf("agent should be gone, got %v", err)
+	}
+	if sc, _ := s.ListScopes(ctx, a.ID); len(sc) != 0 {
+		t.Fatalf("scope grants should be gone, got %v", sc)
+	}
+	if _, err := s.GetOrg(ctx, other.ID); err != nil {
+		t.Fatalf("other org must be untouched, got %v", err)
+	}
+	if err := s.DeleteOrg(ctx, org.ID); err != nil {
+		t.Fatalf("DeleteOrg (again) should be no-op, got %v", err)
+	}
+}
+
+func TestListOrgs(t *testing.T) {
+	s, _ := store.Open(":memory:")
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	a, _ := s.CreateOrg(ctx, "aa")
+	b, _ := s.CreateOrg(ctx, "bb")
+	orgs, err := s.ListOrgs(ctx)
+	if err != nil {
+		t.Fatalf("ListOrgs: %v", err)
+	}
+	got := map[string]string{}
+	for _, o := range orgs {
+		got[o.ID] = o.Name
+	}
+	if got[a.ID] != "aa" || got[b.ID] != "bb" {
+		t.Fatalf("ListOrgs = %+v", orgs)
+	}
+}
+
 func TestCreateUser_DuplicateCasketFingerprintRejected(t *testing.T) {
 	ctx := context.Background()
 	s, err := store.Open(":memory:")

@@ -45,6 +45,8 @@ type Identity interface {
 	Products(ctx context.Context, orgID string) (map[string]bool, error)
 	EnableProduct(ctx context.Context, orgID, product string) error
 	DisableProduct(ctx context.Context, orgID, product string) error
+	ListOrgs(ctx context.Context) ([]store.Org, error)
+	DeleteOrg(ctx context.Context, id string) error
 }
 
 // TokenIssuer verifies herald tokens and signs new ones. The provider
@@ -57,16 +59,24 @@ type TokenIssuer interface {
 // TokenVerifier is the read-only subset (kept for back-compat in signatures).
 type TokenVerifier = TokenIssuer
 
+// OrgPurger fans an org wipe out to the data pillars (herald's internal/purge).
+type OrgPurger interface {
+	PurgeOrg(ctx context.Context, orgID, purgeToken string) (map[string]string, error)
+}
+
 // API is the provisioning HTTP surface.
 type API struct {
 	id         Identity
 	tokens     TokenIssuer
 	adminToken string
+	purger     OrgPurger
 }
 
 // New builds the API. adminToken gates the bootstrap endpoints.
-func New(id Identity, tokens TokenIssuer, adminToken string) *API {
-	return &API{id: id, tokens: tokens, adminToken: adminToken}
+// purger fans org-delete requests to the data pillars; may be nil in tests that
+// don't exercise DELETE /api/orgs/{id}.
+func New(id Identity, tokens TokenIssuer, adminToken string, purger OrgPurger) *API {
+	return &API{id: id, tokens: tokens, adminToken: adminToken, purger: purger}
 }
 
 // Handler returns the provisioning mux.
@@ -74,6 +84,8 @@ func (a *API) Handler() http.Handler {
 	mux := http.NewServeMux()
 	// Admin bootstrap (static admin token).
 	mux.HandleFunc("POST /api/orgs", a.adminOnly(a.handleCreateOrg))
+	mux.HandleFunc("GET /api/orgs", a.adminOnly(a.handleListOrgs))
+	mux.HandleFunc("DELETE /api/orgs/{id}", a.adminOnly(a.handleDeleteOrg))
 	mux.HandleFunc("POST /api/orgs/{org}/humans", a.adminOnly(a.handleCreateHuman))
 	mux.HandleFunc("POST /api/orgs/{org}/agents", a.adminOnly(a.handleAdminCreateAgent))
 	mux.HandleFunc("GET /api/orgs/{org}/products", a.adminOnly(a.handleListProducts))
@@ -119,6 +131,59 @@ func (a *API) handleCreateOrg(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"id": org.ID, "name": org.Name})
+}
+
+func (a *API) handleListOrgs(w http.ResponseWriter, r *http.Request) {
+	orgs, err := a.id.ListOrgs(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "list orgs failed")
+		return
+	}
+	out := make([]map[string]any, 0, len(orgs))
+	for _, o := range orgs {
+		out = append(out, map[string]any{"id": o.ID, "name": o.Name, "status": string(o.Status)})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (a *API) handleDeleteOrg(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var body struct {
+		Name string `json:"name"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	org, err := a.id.GetOrg(r.Context(), id)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "org not found")
+		return
+	}
+	if body.Name == "" || body.Name != org.Name {
+		writeErr(w, http.StatusConflict, "org name confirmation does not match")
+		return
+	}
+	token, err := a.tokens.SignToken(map[string]any{
+		"sub":      "system:purge",
+		"kind":     string(store.KindAgent),
+		"org":      id,
+		"scope":    identity.ScopeOrgPurge,
+		"products": identity.CanonicalProducts,
+	})
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "mint purge token failed")
+		return
+	}
+	pillars, err := a.purger.PurgeOrg(r.Context(), id, token)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "pillar purge failed: "+err.Error())
+		return
+	}
+	if err := a.id.DeleteOrg(r.Context(), id); err != nil {
+		writeErr(w, http.StatusInternalServerError, "herald org delete failed: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": id, "pillars": pillars})
 }
 
 func (a *API) handleListProducts(w http.ResponseWriter, r *http.Request) {

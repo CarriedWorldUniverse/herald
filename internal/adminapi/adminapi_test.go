@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -20,6 +21,76 @@ import (
 	herald "github.com/CarriedWorldUniverse/herald/internal/oidc"
 	"github.com/CarriedWorldUniverse/herald/internal/store"
 )
+
+// stubPurger is a test double for adminapi.OrgPurger.
+type stubPurger struct {
+	called  bool
+	lastOrg string
+	err     error
+}
+
+func (s *stubPurger) PurgeOrg(ctx context.Context, orgID, token string) (map[string]string, error) {
+	s.called = true
+	s.lastOrg = orgID
+	if s.err != nil {
+		return nil, s.err
+	}
+	return map[string]string{"cairn": "ok", "ledger": "ok", "commonplace": "ok"}, nil
+}
+
+// newTestAPIWithPurger builds a fresh in-memory stack with the given purger
+// and returns the API (as an http.Handler via api.Handler()) and the admin token.
+func newTestAPIWithPurger(t *testing.T, p adminapi.OrgPurger) (*adminapi.API, string) {
+	t.Helper()
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	svc := identity.New(s)
+
+	_, signKey, _ := ed25519.GenerateKey(nil)
+	// Use a throwaway server URL for the provider issuer; we'll wire the real
+	// test server handler after building the API.
+	tmpSrv := httptest.NewServer(nil)
+	t.Cleanup(tmpSrv.Close)
+	prov, _ := herald.NewProvider(herald.Config{Issuer: tmpSrv.URL + "/", SigningKey: signKey})
+	grant := herald.NewAgentGrant(prov, svc)
+	prov.SetTokenHandler(grant)
+
+	api := adminapi.New(svc, prov, adminToken, p)
+
+	mux := http.NewServeMux()
+	mux.Handle("/.well-known/", prov.Handler())
+	mux.Handle("/jwks", prov.Handler())
+	mux.Handle("/token", prov.Handler())
+	mux.Handle("/api/", api.Handler())
+	tmpSrv.Config.Handler = mux
+
+	return api, adminToken
+}
+
+// srvJSON issues an authenticated JSON request against srv and returns
+// (statusCode, decoded body). The body parameter may be nil for GET requests.
+func srvJSON(t *testing.T, srv *httptest.Server, tok, method, path string, body any) (int, map[string]any) {
+	t.Helper()
+	resp, m := doJSON(t, method, srv.URL+path, tok, body)
+	return resp.StatusCode, m
+}
+
+// createOrg creates an org via the admin endpoint on srv and returns its ID.
+func createOrg(t *testing.T, srv *httptest.Server, tok, name string) string {
+	t.Helper()
+	code, body := srvJSON(t, srv, tok, "POST", "/api/orgs", map[string]any{"name": name})
+	if code != 200 {
+		t.Fatalf("createOrg %q: status %d %+v", name, code, body)
+	}
+	id, _ := body["id"].(string)
+	if id == "" {
+		t.Fatalf("createOrg %q: no id in response: %+v", name, body)
+	}
+	return id
+}
 
 const adminToken = "test-admin-token"
 
@@ -39,7 +110,7 @@ func newStack(t *testing.T) (*identity.Service, *herald.Provider, *httptest.Serv
 	grant := herald.NewAgentGrant(p, svc)
 	p.SetTokenHandler(grant)
 
-	api := adminapi.New(svc, p, adminToken)
+	api := adminapi.New(svc, p, adminToken, nil)
 
 	// Combined mux: OIDC endpoints + admin/provision API.
 	mux := http.NewServeMux()
@@ -552,5 +623,76 @@ func TestAgentByFingerprint(t *testing.T) {
 	resp, _ = doJSON(t, "GET", srv.URL+"/api/agents/by-fingerprint/"+fp, "", nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("no-token in-cluster lookup = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestDeleteOrg_ConfirmByNameAndCascade(t *testing.T) {
+	sp := &stubPurger{}
+	api, admin := newTestAPIWithPurger(t, sp)
+	srv := httptest.NewServer(api.Handler())
+	t.Cleanup(srv.Close)
+
+	org := createOrg(t, srv, admin, "acme")
+
+	code, _ := srvJSON(t, srv, admin, "DELETE", "/api/orgs/"+org, map[string]any{"name": "WRONG"})
+	if code != 409 || sp.called {
+		t.Fatalf("wrong name: code=%d purged=%v, want 409 + no purge", code, sp.called)
+	}
+	code, _ = srvJSON(t, srv, admin, "DELETE", "/api/orgs/no-such", map[string]any{"name": "x"})
+	if code != 404 {
+		t.Fatalf("missing org = %d, want 404", code)
+	}
+	code, body := srvJSON(t, srv, admin, "DELETE", "/api/orgs/"+org, map[string]any{"name": "acme"})
+	if code != 200 || !sp.called || sp.lastOrg != org {
+		t.Fatalf("delete = %d purged=%v org=%s body=%+v", code, sp.called, sp.lastOrg, body)
+	}
+}
+
+func TestDeleteOrg_StrictPurgeFailureLeavesOrg(t *testing.T) {
+	sp := &stubPurger{err: errors.New("purge ledger: status 500")}
+	api, admin := newTestAPIWithPurger(t, sp)
+	srv := httptest.NewServer(api.Handler())
+	t.Cleanup(srv.Close)
+	org := createOrg(t, srv, admin, "acme")
+
+	code, _ := srvJSON(t, srv, admin, "DELETE", "/api/orgs/"+org, map[string]any{"name": "acme"})
+	if code != 502 {
+		t.Fatalf("purge failure = %d, want 502", code)
+	}
+	// Org must still exist (herald identity NOT deleted on strict abort).
+	code, _ = srvJSON(t, srv, admin, "GET", "/api/orgs/"+org+"/products", nil)
+	if code == 404 {
+		t.Fatalf("org should still exist after strict purge abort")
+	}
+}
+
+func TestListOrgs(t *testing.T) {
+	api, admin := newTestAPIWithPurger(t, &stubPurger{})
+	srv := httptest.NewServer(api.Handler())
+	t.Cleanup(srv.Close)
+	org := createOrg(t, srv, admin, "acme")
+
+	var buf bytes.Buffer
+	req, _ := http.NewRequest("GET", srv.URL+"/api/orgs", &buf)
+	req.Header.Set("Authorization", "Bearer "+admin)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /api/orgs: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("list = %d", resp.StatusCode)
+	}
+	var orgs []map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&orgs)
+	found := false
+	for _, o := range orgs {
+		if o["id"] == org {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("org %q not found in list: %+v", org, orgs)
 	}
 }
