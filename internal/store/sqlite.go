@@ -245,3 +245,52 @@ func mustAffect(res sql.Result) error {
 	}
 	return nil
 }
+
+func (s *SQLite) SetProductEnabled(ctx context.Context, orgID, product string, enabled bool) error {
+	e := 0
+	if enabled {
+		e = 1
+	}
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO org_product (org_id, product, enabled, updated_at)
+		 VALUES (?, ?, ?, datetime('now'))
+		 ON CONFLICT(org_id, product) DO UPDATE SET enabled=excluded.enabled, updated_at=datetime('now')`,
+		orgID, product, e)
+	if err != nil {
+		return fmt.Errorf("SetProductEnabled: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLite) IsProductEnabled(ctx context.Context, orgID, product string) (bool, error) {
+	var enabled int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT enabled FROM org_product WHERE org_id = ? AND product = ?`, orgID, product).
+		Scan(&enabled)
+	if errors.Is(err, sql.ErrNoRows) {
+		return true, nil // deny-list: no row = enabled
+	}
+	if err != nil {
+		return false, fmt.Errorf("IsProductEnabled: %w", err)
+	}
+	return enabled == 1, nil
+}
+
+func (s *SQLite) ListProductOverrides(ctx context.Context, orgID string) (map[string]bool, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT product, enabled FROM org_product WHERE org_id = ?`, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("ListProductOverrides: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var p string
+		var e int
+		if err := rows.Scan(&p, &e); err != nil {
+			return nil, fmt.Errorf("ListProductOverrides scan: %w", err)
+		}
+		out[p] = e == 1
+	}
+	return out, rows.Err()
+}

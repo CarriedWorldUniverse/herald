@@ -97,6 +97,12 @@ type Store interface {
 	RevokeScope(ctx context.Context, userID, scope string) error
 	ListScopes(ctx context.Context, userID string) ([]string, error)
 
+	// Product entitlement (deny-list: an absent row OR enabled=1 means
+	// the product is enabled for the org).
+	SetProductEnabled(ctx context.Context, orgID, product string, enabled bool) error
+	IsProductEnabled(ctx context.Context, orgID, product string) (bool, error)
+	ListProductOverrides(ctx context.Context, orgID string) (map[string]bool, error)
+
 	// Close releases resources.
 	Close() error
 }

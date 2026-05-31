@@ -38,3 +38,13 @@ CREATE TABLE IF NOT EXISTS scope_grant (
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE(user_id, scope)
 );
+
+-- Per-org product entitlement (deny-list): a product is ENABLED unless a row
+-- with enabled=0 exists. Absent row = enabled. herald is core (never listed).
+CREATE TABLE IF NOT EXISTS org_product (
+  org_id     TEXT NOT NULL REFERENCES org(id),
+  product    TEXT NOT NULL,
+  enabled    INTEGER NOT NULL DEFAULT 1,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (org_id, product)
+);
