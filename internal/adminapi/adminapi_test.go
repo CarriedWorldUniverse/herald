@@ -322,6 +322,105 @@ func TestHumanPasswordAndScopes(t *testing.T) {
 	}
 }
 
+// TestAdminCreateAgent_DuplicatePubkey_409 verifies that registering a second
+// agent with an already-registered casket pubkey via the admin endpoint returns
+// 409 Conflict, and that a distinct pubkey still succeeds with 200.
+func TestAdminCreateAgent_DuplicatePubkey_409(t *testing.T) {
+	_, _, srv := newStack(t)
+
+	_, org := adminPost(t, srv.URL+"/api/orgs", map[string]any{"name": "acme-dup-admin"})
+	orgID, _ := org["id"].(string)
+	_, human := adminPost(t, srv.URL+"/api/orgs/"+orgID+"/humans", map[string]any{"display_name": "jacinta"})
+	humanID, _ := human["id"].(string)
+
+	// Two agents will share this pubkey.
+	_, sharedPub, _ := casket.DeriveAgentKey([]byte("nex426-admin-dup-seed-32b-xxxxx!"), "shared-key")
+
+	// First registration with the shared pubkey: should succeed.
+	resp, body := adminPost(t, srv.URL+"/api/orgs/"+orgID+"/agents", map[string]any{
+		"display_name":      "agent-alpha",
+		"responsible_human": humanID,
+		"casket_pubkey":     base64.StdEncoding.EncodeToString(sharedPub),
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("first admin create: expected 200, got %d %+v", resp.StatusCode, body)
+	}
+
+	// Second registration with the SAME pubkey: must return 409.
+	resp, body = adminPost(t, srv.URL+"/api/orgs/"+orgID+"/agents", map[string]any{
+		"display_name":      "agent-beta",
+		"responsible_human": humanID,
+		"casket_pubkey":     base64.StdEncoding.EncodeToString(sharedPub),
+	})
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("admin create duplicate pubkey: expected 409, got %d %+v", resp.StatusCode, body)
+	}
+	if errMsg, _ := body["error"].(string); errMsg == "" {
+		t.Fatalf("409 response missing error field: %+v", body)
+	}
+
+	// Sanity: a DISTINCT pubkey must still return 200 (409 is not over-firing).
+	_, distinctPub, _ := casket.DeriveAgentKey([]byte("nex426-admin-dup-seed-32b-xxxxx!"), "distinct-key")
+	resp, body = adminPost(t, srv.URL+"/api/orgs/"+orgID+"/agents", map[string]any{
+		"display_name":      "agent-gamma",
+		"responsible_human": humanID,
+		"casket_pubkey":     base64.StdEncoding.EncodeToString(distinctPub),
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("admin create distinct pubkey: expected 200, got %d %+v", resp.StatusCode, body)
+	}
+}
+
+// TestSelfProvisionAgent_DuplicatePubkey_409 verifies that the self-provision
+// endpoint (POST /api/agents) also returns 409 Conflict when the submitted
+// casket pubkey is already registered to another agent.
+func TestSelfProvisionAgent_DuplicatePubkey_409(t *testing.T) {
+	_, _, srv := newStack(t)
+
+	_, org := adminPost(t, srv.URL+"/api/orgs", map[string]any{"name": "acme-dup-selfprov"})
+	orgID, _ := org["id"].(string)
+	_, human := adminPost(t, srv.URL+"/api/orgs/"+orgID+"/humans", map[string]any{"display_name": "jacinta"})
+	humanID, _ := human["id"].(string)
+
+	// Bootstrap agent with agent:create scope (the self-provisioner caller).
+	bsPriv, bsPub, _ := casket.DeriveAgentKey([]byte("nex426-selfprov-dup-seed-32b-xx!"), "bootstrap")
+	resp, bsBody := adminPost(t, srv.URL+"/api/orgs/"+orgID+"/agents", map[string]any{
+		"display_name":      "bootstrap",
+		"responsible_human": humanID,
+		"casket_pubkey":     base64.StdEncoding.EncodeToString(bsPub),
+		"scopes":            []string{"agent:create"},
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("bootstrap agent: %d %+v", resp.StatusCode, bsBody)
+	}
+	bsID, _ := bsBody["id"].(string)
+	bsTok := mintAgentToken(t, srv.URL, bsID, bsPriv)
+
+	// The shared pubkey for the two duplicate self-provision attempts.
+	_, sharedPub, _ := casket.DeriveAgentKey([]byte("nex426-selfprov-dup-seed-32b-xx!"), "shared-child")
+
+	// First self-provision with the shared pubkey: should succeed (201/200).
+	resp, body := doJSON(t, "POST", srv.URL+"/api/agents", bsTok, map[string]any{
+		"display_name":  "child-one",
+		"casket_pubkey": base64.StdEncoding.EncodeToString(sharedPub),
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("first self-provision: expected 200, got %d %+v", resp.StatusCode, body)
+	}
+
+	// Second self-provision with the SAME pubkey: must return 409.
+	resp, body = doJSON(t, "POST", srv.URL+"/api/agents", bsTok, map[string]any{
+		"display_name":  "child-two",
+		"casket_pubkey": base64.StdEncoding.EncodeToString(sharedPub),
+	})
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("self-provision duplicate pubkey: expected 409, got %d %+v", resp.StatusCode, body)
+	}
+	if errMsg, _ := body["error"].(string); errMsg == "" {
+		t.Fatalf("409 response missing error field: %+v", body)
+	}
+}
+
 func TestAgentByFingerprint(t *testing.T) {
 	_, _, srv := newStack(t)
 
