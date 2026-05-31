@@ -90,13 +90,19 @@ func (svc *Service) createAgent(ctx context.Context, orgID, displayName, respons
 	if human.OrgID != orgID {
 		return store.User{}, errors.New("identity.CreateAgent: responsible human must be in the same org")
 	}
+	fp := Fingerprint(pub)
+	if _, err := svc.store.GetUserByCasketFingerprint(ctx, fp); err == nil {
+		return store.User{}, store.ErrDuplicateFingerprint
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return store.User{}, fmt.Errorf("identity.createAgent: fingerprint check: %w", err)
+	}
 	return svc.store.CreateUser(ctx, store.User{
 		OrgID:             orgID,
 		Kind:              store.KindAgent,
 		DisplayName:       displayName,
 		Status:            status,
 		CasketPubkey:      []byte(pub),
-		CasketFingerprint: Fingerprint(pub),
+		CasketFingerprint: fp,
 		ResponsibleHuman:  responsibleHuman,
 	})
 }
