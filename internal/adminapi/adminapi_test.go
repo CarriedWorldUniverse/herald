@@ -293,6 +293,35 @@ func adminPost(t *testing.T, url string, body any) (*http.Response, map[string]a
 	return doJSON(t, "POST", url, adminToken, body)
 }
 
+func TestHumanPasswordAndScopes(t *testing.T) {
+	_, _, srv := newStack(t)
+
+	_, org := adminPost(t, srv.URL+"/api/orgs", map[string]any{"name": "acme"})
+	orgID, _ := org["id"].(string)
+
+	_, human := adminPost(t, srv.URL+"/api/orgs/"+orgID+"/humans",
+		map[string]any{"display_name": "alice", "scopes": []string{"issue:read", "issue:write"}})
+	humanID, _ := human["id"].(string)
+	if humanID == "" {
+		t.Fatalf("no human id: %v", human)
+	}
+
+	resp, _ := adminPost(t, srv.URL+"/api/humans/"+humanID+"/password", map[string]any{"password": "hunter2hunter2"})
+	if resp.StatusCode != 200 {
+		t.Fatalf("set password: %d", resp.StatusCode)
+	}
+
+	resp, _ = adminPost(t, srv.URL+"/api/humans/"+humanID+"/password", map[string]any{"password": "x"})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("short password = %d, want 400", resp.StatusCode)
+	}
+
+	resp, _ = doJSON(t, "POST", srv.URL+"/api/humans/"+humanID+"/password", "", map[string]any{"password": "hunter2hunter2"})
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("no-token = %d, want 401", resp.StatusCode)
+	}
+}
+
 func TestAgentByFingerprint(t *testing.T) {
 	_, _, srv := newStack(t)
 
