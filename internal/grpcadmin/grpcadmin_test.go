@@ -64,11 +64,34 @@ func TestSeed(t *testing.T) {
 	if !found {
 		t.Errorf("owner scopes = %v, want %s", scopes, ScopePlatformAdmin)
 	}
-	// idempotent: second seed is a no-op
+	// The admin org is control-plane-only: every product must be disabled so
+	// admin accounts structurally can't use cwb products.
+	adminOrgID := ""
+	orgs, _ := id.ListOrgs(ctx)
+	for _, o := range orgs {
+		if o.Name == cfg.AdminOrgName {
+			adminOrgID = o.ID
+		}
+	}
+	assertAllProductsDisabled := func(when string) {
+		prods, err := id.Products(ctx, adminOrgID)
+		if err != nil {
+			t.Fatalf("Products(%s): %v", when, err)
+		}
+		for p, enabled := range prods {
+			if enabled {
+				t.Errorf("admin org product %q enabled %s, want disabled", p, when)
+			}
+		}
+	}
+	assertAllProductsDisabled("after first seed")
+
+	// idempotent: second seed is a no-op (still "") and leaves products disabled
 	id2, err := Seed(ctx, id, cfg)
 	if err != nil || id2 != "" {
 		t.Errorf("second Seed = %q, %v; want \"\", nil (no-op)", id2, err)
 	}
+	assertAllProductsDisabled("after idempotent re-seed")
 	// no password + absent org → error (so the operator knows to supply the secret)
 	if _, err := Seed(ctx, newID(t), SeedConfig{AdminOrgName: "x", OwnerDisplayName: "y@z"}); err == nil {
 		t.Error("Seed with no password + absent org should error")
