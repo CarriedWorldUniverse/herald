@@ -4,7 +4,7 @@
 #   podman save herald:dev | sudo k3s ctr images import -
 #
 # Runtime config via env (see cmd/herald/main.go):
-#   HERALD_ADDR, HERALD_DB, HERALD_ISSUER, HERALD_ADMIN_TOKEN, HERALD_SIGNING_KEY
+#   HERALD_ADDR, HERALD_DB, HERALD_ISSUER, HERALD_SIGNING_KEY
 FROM docker.io/library/golang:1.26 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
