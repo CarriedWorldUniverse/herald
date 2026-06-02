@@ -31,6 +31,8 @@ func accessClaims(ctx context.Context, id IdentityResolver, u store.User) (map[s
 		out["agent_fp"] = u.CasketFingerprint
 		if u.ResponsibleHuman != "" {
 			out["act"] = map[string]any{"sub": u.ResponsibleHuman}
+			// human_fp is best-effort enrichment: if the responsible human's
+			// record is unavailable, omit it rather than fail token issuance.
 			if human, err := id.GetUser(ctx, u.ResponsibleHuman); err == nil && human.CasketFingerprint != "" {
 				out["human_fp"] = human.CasketFingerprint
 			}
