@@ -23,13 +23,14 @@ type HumanResolver interface {
 // user id + password; herald verifies the bcrypt hash and issues a kind:human
 // access token. Mirrors AgentGrant's shape.
 type HumanGrant struct {
-	p  *Provider
-	id HumanResolver
+	p       *Provider
+	id      HumanResolver
+	refresh *RefreshIssuer
 }
 
 // NewHumanGrant wires the grant to a provider + human resolver.
-func NewHumanGrant(p *Provider, id HumanResolver) *HumanGrant {
-	return &HumanGrant{p: p, id: id}
+func NewHumanGrant(p *Provider, id HumanResolver, refresh *RefreshIssuer) *HumanGrant {
+	return &HumanGrant{p: p, id: id, refresh: refresh}
 }
 
 // ServeToken handles POST /token for the password grant.
@@ -59,9 +60,15 @@ func (g *HumanGrant) ServeToken(w http.ResponseWriter, r *http.Request) {
 		oauthError(w, http.StatusInternalServerError, "server_error", "token signing failed")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"access_token": tok,
 		"token_type":   "Bearer",
 		"expires_in":   int(g.p.TTL().Seconds()),
-	})
+	}
+	if g.refresh != nil {
+		if rtok, err := g.refresh.Issue(r.Context(), u.ID); err == nil {
+			resp["refresh_token"] = rtok
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }

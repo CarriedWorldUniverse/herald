@@ -63,9 +63,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("herald: provider: %v", err)
 	}
+	refreshTTL := envDuration("HERALD_REFRESH_TTL", 0) // 0 -> issuer default (30d)
+	refresh := oidc.NewRefreshIssuer(provider, st, refreshTTL)
 	provider.SetTokenHandler(oidc.NewGrantMux(
-		oidc.NewAgentGrant(provider, idsvc),
-		oidc.NewHumanGrant(provider, idsvc),
+		oidc.NewAgentGrant(provider, idsvc, refresh),
+		oidc.NewHumanGrant(provider, idsvc, refresh),
 	))
 
 	gatewayBase := os.Getenv("HERALD_GATEWAY_URL")
@@ -175,6 +177,16 @@ func heraldGRPCServerOptions() []grpc.ServerOption {
 func env(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return def
+}
+
+func envDuration(key string, def time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+		log.Printf("herald: ignoring invalid %s=%q", key, v)
 	}
 	return def
 }

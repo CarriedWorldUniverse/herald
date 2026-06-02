@@ -33,13 +33,14 @@ type IdentityResolver interface {
 // short-lived access token whose claims (incl. act.sub = responsible human)
 // are stamped FROM THE RECORD — never from client input.
 type AgentGrant struct {
-	p  *Provider
-	id IdentityResolver
+	p       *Provider
+	id      IdentityResolver
+	refresh *RefreshIssuer
 }
 
 // NewAgentGrant wires the grant to a provider + identity resolver.
-func NewAgentGrant(p *Provider, id IdentityResolver) *AgentGrant {
-	return &AgentGrant{p: p, id: id}
+func NewAgentGrant(p *Provider, id IdentityResolver, refresh *RefreshIssuer) *AgentGrant {
+	return &AgentGrant{p: p, id: id, refresh: refresh}
 }
 
 // ServeToken handles POST /token for the jwt-bearer grant.
@@ -58,42 +59,48 @@ func (g *AgentGrant) ServeToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tok, err := g.issue(r.Context(), assertion, g.p.TokenURL())
+	tok, subject, err := g.issue(r.Context(), assertion, g.p.TokenURL())
 	if err != nil {
 		// Uniform 401 for all assertion failures — don't leak which check failed.
 		oauthError(w, http.StatusUnauthorized, "invalid_grant", "assertion rejected")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"access_token": tok,
 		"token_type":   "Bearer",
 		"expires_in":   int(g.p.TTL().Seconds()),
-	})
+	}
+	if g.refresh != nil {
+		if rtok, err := g.refresh.Issue(r.Context(), subject); err == nil {
+			resp["refresh_token"] = rtok
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // issue verifies the assertion and returns a signed access token, or an error
 // (deliberately coarse — the handler maps any error to 401).
-func (g *AgentGrant) issue(ctx context.Context, assertion, tokenURL string) (string, error) {
+func (g *AgentGrant) issue(ctx context.Context, assertion, tokenURL string) (token, subject string, err error) {
 	// 1. Parse the assertion WITHOUT trusting it (no key yet) to read `sub`.
 	jws, err := jose.ParseSigned(assertion, []jose.SignatureAlgorithm{jose.EdDSA})
 	if err != nil {
-		return "", fmt.Errorf("parse assertion: %w", err)
+		return "", "", fmt.Errorf("parse assertion: %w", err)
 	}
 	var unverified assertionClaims
 	if err := json.Unmarshal(jws.UnsafePayloadWithoutVerification(), &unverified); err != nil {
-		return "", fmt.Errorf("assertion claims: %w", err)
+		return "", "", fmt.Errorf("assertion claims: %w", err)
 	}
 	if unverified.Subject == "" || unverified.Issuer != unverified.Subject {
-		return "", errors.New("assertion iss must equal sub (the agent id)")
+		return "", "", errors.New("assertion iss must equal sub (the agent id)")
 	}
 
 	// 2. Resolve the agent + its REGISTERED casket public key.
 	agent, err := g.id.GetUser(ctx, unverified.Subject)
 	if err != nil {
-		return "", fmt.Errorf("unknown agent: %w", err)
+		return "", "", fmt.Errorf("unknown agent: %w", err)
 	}
 	if agent.Kind != store.KindAgent || len(agent.CasketPubkey) != ed25519.PublicKeySize {
-		return "", errors.New("subject is not a key-registered agent")
+		return "", "", errors.New("subject is not a key-registered agent")
 	}
 
 	// 3. Verify the assertion signature against the registered key. This is the
@@ -101,34 +108,38 @@ func (g *AgentGrant) issue(ctx context.Context, assertion, tokenURL string) (str
 	//    can produce a valid assertion.
 	verified, err := jws.Verify(ed25519.PublicKey(agent.CasketPubkey))
 	if err != nil {
-		return "", fmt.Errorf("assertion signature: %w", err)
+		return "", "", fmt.Errorf("assertion signature: %w", err)
 	}
 	var claims assertionClaims
 	if err := json.Unmarshal(verified, &claims); err != nil {
-		return "", fmt.Errorf("verified claims: %w", err)
+		return "", "", fmt.Errorf("verified claims: %w", err)
 	}
 
 	// 4. Validate audience + expiry of the assertion.
 	if !claims.audienceMatches(tokenURL) {
-		return "", errors.New("assertion audience mismatch")
+		return "", "", errors.New("assertion audience mismatch")
 	}
 	if claims.Expiry == 0 || g.p.Now().After(time.Unix(claims.Expiry, 0)) {
-		return "", errors.New("assertion expired or missing exp")
+		return "", "", errors.New("assertion expired or missing exp")
 	}
 
 	// 5. Enforce the block cascade — agent must be active AND its responsible
 	//    human + org must be active (identity.IsActive evaluates this).
 	if !g.id.IsActive(ctx, agent.ID) {
-		return "", errors.New("agent inactive (blocked, or responsible human/org blocked)")
+		return "", "", errors.New("agent inactive (blocked, or responsible human/org blocked)")
 	}
 
 	// 6. Assemble the access token. act.sub, org, fingerprints come FROM THE
 	//    RECORD — client-supplied values in the assertion are ignored.
 	out, err := accessClaims(ctx, g.id, agent)
 	if err != nil {
-		return "", fmt.Errorf("claims: %w", err)
+		return "", "", fmt.Errorf("claims: %w", err)
 	}
-	return g.p.SignToken(out)
+	signed, err := g.p.SignToken(out)
+	if err != nil {
+		return "", "", err
+	}
+	return signed, agent.ID, nil
 }
 
 // assertionClaims is the subset of the agent's jwt-bearer assertion herald reads.

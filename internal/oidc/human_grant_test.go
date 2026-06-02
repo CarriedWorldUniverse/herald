@@ -35,7 +35,7 @@ func humanStack(t *testing.T) (*identity.Service, *httptest.Server, string) {
 	if err != nil {
 		t.Fatalf("NewProvider: %v", err)
 	}
-	p.SetTokenHandler(herald.NewGrantMux(herald.NewAgentGrant(p, svc), herald.NewHumanGrant(p, svc)))
+	p.SetTokenHandler(herald.NewGrantMux(herald.NewAgentGrant(p, svc, nil), herald.NewHumanGrant(p, svc, nil)))
 	srv := httptest.NewServer(p.Handler())
 	t.Cleanup(srv.Close)
 	return svc, srv, org.ID
