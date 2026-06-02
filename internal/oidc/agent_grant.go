@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"time"
 
@@ -71,7 +72,11 @@ func (g *AgentGrant) ServeToken(w http.ResponseWriter, r *http.Request) {
 		"expires_in":   int(g.p.TTL().Seconds()),
 	}
 	if g.refresh != nil {
-		if rtok, err := g.refresh.Issue(r.Context(), subject); err == nil {
+		// Refresh is best-effort: a failure still returns a usable access token,
+		// but log it — silent absence would surface only as clients re-minting.
+		if rtok, err := g.refresh.Issue(r.Context(), subject); err != nil {
+			log.Printf("oidc: refresh.Issue for agent %s: %v", subject, err)
+		} else {
 			resp["refresh_token"] = rtok
 		}
 	}

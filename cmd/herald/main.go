@@ -11,6 +11,7 @@
 //	HERALD_DB           sqlite path (default /var/lib/nexus/herald.db; ":memory:" ok)
 //	HERALD_ISSUER       OIDC issuer URL (default http://<addr>/) — set to the
 //	                    externally-reachable https URL in production
+//	HERALD_REFRESH_TTL  refresh-token lifetime (Go duration, e.g. "720h"; default 30d)
 //	HERALD_SIGNING_KEY  base64(std) Ed25519 private key (64 bytes). If unset, a
 //	                    key is generated on boot and its public JWKS logged —
 //	                    fine for dev, NOT for prod (tokens won't survive restart).

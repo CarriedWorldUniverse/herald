@@ -40,14 +40,14 @@ type Config struct {
 
 // Provider signs/verifies herald tokens and serves the OIDC endpoints.
 type Provider struct {
-	issuer   string
-	priv     ed25519.PrivateKey
-	pub      ed25519.PublicKey
-	kid      string
-	ttl      time.Duration
-	signer   jose.Signer
-	now      func() time.Time
-	tokenEP  TokenHandler // optional; set by the agent-grant task
+	issuer  string
+	priv    ed25519.PrivateKey
+	pub     ed25519.PublicKey
+	kid     string
+	ttl     time.Duration
+	signer  jose.Signer
+	now     func() time.Time
+	tokenEP TokenHandler // optional; set by the agent-grant task
 }
 
 // TokenHandler handles POST /token. Wired by the agent-grant task; nil yields

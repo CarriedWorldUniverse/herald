@@ -2,6 +2,7 @@ package oidc
 
 import (
 	"context"
+	"log"
 	"net/http"
 
 	"github.com/CarriedWorldUniverse/herald/internal/store"
@@ -66,7 +67,11 @@ func (g *HumanGrant) ServeToken(w http.ResponseWriter, r *http.Request) {
 		"expires_in":   int(g.p.TTL().Seconds()),
 	}
 	if g.refresh != nil {
-		if rtok, err := g.refresh.Issue(r.Context(), u.ID); err == nil {
+		// Refresh is best-effort: a failure still returns a usable access token,
+		// but log it — silent absence would surface only as clients re-logging in.
+		if rtok, err := g.refresh.Issue(r.Context(), u.ID); err != nil {
+			log.Printf("oidc: refresh.Issue for human %s: %v", u.ID, err)
+		} else {
 			resp["refresh_token"] = rtok
 		}
 	}

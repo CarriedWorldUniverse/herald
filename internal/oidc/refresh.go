@@ -21,7 +21,8 @@ const refreshTokenGrant = "refresh_token"
 // defaultRefreshTTL bounds a refresh token's life (overridable via NewRefreshIssuer).
 const defaultRefreshTTL = 720 * time.Hour // 30 days
 
-// RefreshStore is the persistence slice the refresh machinery needs.
+// RefreshStore is the persistence slice the refresh machinery needs. It is a
+// subset of store.Store; the concrete SQLite store satisfies it directly.
 type RefreshStore interface {
 	CreateRefreshToken(ctx context.Context, rt store.RefreshToken) error
 	GetRefreshToken(ctx context.Context, id string) (store.RefreshToken, error)
@@ -63,7 +64,7 @@ func (ri *RefreshIssuer) rotate(ctx context.Context, old store.RefreshToken) (st
 
 func (ri *RefreshIssuer) persist(ctx context.Context, userID, id, chainID string) (string, error) {
 	secret := randB64(32)
-	exp := ri.p.now().Add(ri.ttl).UTC().Format(time.RFC3339)
+	exp := ri.p.Now().Add(ri.ttl).UTC().Format(time.RFC3339)
 	if err := ri.st.CreateRefreshToken(ctx, store.RefreshToken{
 		ID: id, ChainID: chainID, TokenHash: sha256hex(secret), UserID: userID, ExpiresAt: exp,
 	}); err != nil {
@@ -91,7 +92,7 @@ func (ri *RefreshIssuer) validate(ctx context.Context, presented string) (store.
 		return store.RefreshToken{}, errors.New("refresh token revoked")
 	}
 	exp, err := time.Parse(time.RFC3339, rt.ExpiresAt)
-	if err != nil || ri.p.now().After(exp) {
+	if err != nil || ri.p.Now().After(exp) {
 		return store.RefreshToken{}, errors.New("refresh token expired")
 	}
 	return rt, nil
@@ -117,6 +118,7 @@ func splitRefresh(s string) (id, secret string, ok bool) {
 	return s[:i], s[i+1:], true
 }
 
+// crypto/rand.Read never fails on Linux/macOS/Windows; the blank-discard is intentional.
 func randHex(n int) string {
 	b := make([]byte, n)
 	_, _ = rand.Read(b)
