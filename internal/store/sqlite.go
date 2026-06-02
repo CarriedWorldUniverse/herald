@@ -244,8 +244,10 @@ func (s *SQLite) GetRefreshToken(ctx context.Context, id string) (RefreshToken, 
 }
 
 func (s *SQLite) RevokeRefreshChain(ctx context.Context, chainID string) error {
+	// RFC3339 UTC to match expires_at's format (so RevokedAt is parseable by
+	// any consumer, not just emptiness-checked).
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE refresh_token SET revoked_at = datetime('now')
+		`UPDATE refresh_token SET revoked_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
 		   WHERE chain_id = ? AND revoked_at IS NULL`, chainID)
 	if err != nil {
 		return fmt.Errorf("RevokeRefreshChain: %w", err)

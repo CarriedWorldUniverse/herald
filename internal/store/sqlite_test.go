@@ -28,6 +28,9 @@ func TestRefreshToken_CreateGetRevokeChain(t *testing.T) {
 	if got.UserID != u.ID || got.ChainID != "h1" || got.TokenHash != "hash1" || got.RevokedAt != "" {
 		t.Fatalf("round-trip mismatch: %+v", got)
 	}
+	if got.IssuedAt == "" {
+		t.Fatal("IssuedAt not populated from the DB default")
+	}
 
 	// A successor in the same chain.
 	if err := s.CreateRefreshToken(ctx, RefreshToken{ID: "h2", ChainID: "h1", TokenHash: "hash2", UserID: u.ID, ExpiresAt: exp}); err != nil {
