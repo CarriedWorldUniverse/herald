@@ -217,3 +217,38 @@ func TestHumanPassword(t *testing.T) {
 		t.Fatalf("verify no-password err = %v, want ErrInvalidCredentials", err)
 	}
 }
+
+// TestVerifyHumanPasswordByEmail covers Phase-5a login-by-email: a human can
+// authenticate by display name (email), not only by user id, and an ambiguous
+// display name fails closed.
+func TestVerifyHumanPasswordByEmail(t *testing.T) {
+	svc := newTestIdentity(t)
+	ctx := context.Background()
+	org, _ := svc.CreateOrg(ctx, "acme")
+	h, _ := svc.CreateHuman(ctx, org.ID, "cwadmin@carriedworld.com")
+	if err := svc.SetHumanPassword(ctx, h.ID, "supersecret1"); err != nil {
+		t.Fatalf("SetHumanPassword: %v", err)
+	}
+
+	// by id (back-compat)
+	if _, err := svc.VerifyHumanPassword(ctx, h.ID, "supersecret1"); err != nil {
+		t.Errorf("login by id: %v", err)
+	}
+	// by email / display name
+	if got, err := svc.VerifyHumanPassword(ctx, "cwadmin@carriedworld.com", "supersecret1"); err != nil || got.ID != h.ID {
+		t.Errorf("login by email: got %s err %v, want %s", got.ID, err, h.ID)
+	}
+	// wrong password
+	if _, err := svc.VerifyHumanPassword(ctx, "cwadmin@carriedworld.com", "nope"); !errors.Is(err, identity.ErrInvalidCredentials) {
+		t.Errorf("wrong password: want ErrInvalidCredentials, got %v", err)
+	}
+	// ambiguous display name fails closed (two humans, same name, different orgs)
+	org2, _ := svc.CreateOrg(ctx, "beta")
+	h2, _ := svc.CreateHuman(ctx, org2.ID, "dup@x.com")
+	_ = svc.SetHumanPassword(ctx, h2.ID, "supersecret1")
+	h3, _ := svc.CreateHuman(ctx, org.ID, "dup@x.com")
+	_ = svc.SetHumanPassword(ctx, h3.ID, "supersecret1")
+	if _, err := svc.VerifyHumanPassword(ctx, "dup@x.com", "supersecret1"); !errors.Is(err, identity.ErrInvalidCredentials) {
+		t.Errorf("ambiguous email must fail closed, got %v", err)
+	}
+}
