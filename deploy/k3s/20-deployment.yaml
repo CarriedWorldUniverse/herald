@@ -46,11 +46,6 @@ spec:
               # consumers resolve everything through the gateway. Override
               # via patch when running on a different host/DNS.
               value: "http://dmonextreme.tail41686e.ts.net:8080/herald/"
-            - name: HERALD_ADMIN_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: herald-secrets
-                  key: admin_token
             - name: HERALD_SIGNING_KEY
               valueFrom:
                 secretKeyRef:

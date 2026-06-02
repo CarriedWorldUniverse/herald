@@ -11,7 +11,6 @@
 //	HERALD_DB           sqlite path (default /var/lib/nexus/herald.db; ":memory:" ok)
 //	HERALD_ISSUER       OIDC issuer URL (default http://<addr>/) — set to the
 //	                    externally-reachable https URL in production
-//	HERALD_ADMIN_TOKEN  bearer token gating the bootstrap endpoints (required)
 //	HERALD_SIGNING_KEY  base64(std) Ed25519 private key (64 bytes). If unset, a
 //	                    key is generated on boot and its public JWKS logged —
 //	                    fine for dev, NOT for prod (tokens won't survive restart).
@@ -45,10 +44,6 @@ import (
 func main() {
 	addr := env("HERALD_ADDR", ":8099")
 	dbPath := env("HERALD_DB", "/var/lib/nexus/herald.db")
-	adminToken := os.Getenv("HERALD_ADMIN_TOKEN")
-	if adminToken == "" {
-		log.Fatal("herald: HERALD_ADMIN_TOKEN is required")
-	}
 	issuer := env("HERALD_ISSUER", "http://"+addr+"/")
 
 	signKey, err := loadOrGenSigningKey()
@@ -79,7 +74,7 @@ func main() {
 	}
 	purger := purge.New(gatewayBase, &http.Client{Timeout: 30 * time.Second})
 
-	api := adminapi.New(idsvc, provider, adminToken, purger)
+	api := adminapi.New(idsvc, provider)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -90,7 +85,9 @@ func main() {
 	mux.Handle("/.well-known/", provider.Handler())
 	mux.Handle("/jwks", provider.Handler())
 	mux.Handle("/token", provider.Handler())
-	// Provisioning + admin.
+	// Token-authed provisioning (self-provision, validate) + the in-cluster
+	// by-fingerprint lookup. The org/human/product admin surface lives in the
+	// gRPC AdminService below (identity-derived authz, no static admin token).
 	mux.Handle("/api/", api.Handler())
 
 	// Genesis (Phase 4): idempotently provision the admin (administration) org +
@@ -107,10 +104,10 @@ func main() {
 	}
 
 	// gRPC admin/internal API (Phase 4) over mTLS, fronted by interchange. OPT-IN:
-	// it starts only when mTLS certs are configured (or the dev opt-in is set),
-	// so until step-4 wires the certs herald runs HTTP-only exactly as before.
-	// The HTTP OIDC + admin API above are unchanged; the static-admin-token path
-	// is retained during the transition and removed in the cleanup.
+	// it starts only when mTLS certs are configured (or the dev opt-in is set).
+	// This is now the ONLY path to org/human/product admin (the static-admin-token
+	// HTTP surface was retired in Phase 5); authz is identity-derived from the
+	// herald JWT injected by interchange.
 	if os.Getenv("HERALD_TLS_CERT") != "" || os.Getenv("HERALD_DEV_INSECURE") == "1" {
 		grpcAddr := env("HERALD_GRPC_ADDR", ":8098")
 		grpcSrv := grpc.NewServer(heraldGRPCServerOptions()...)

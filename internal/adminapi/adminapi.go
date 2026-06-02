@@ -1,13 +1,18 @@
-// Package adminapi exposes herald's provisioning surface:
+// Package adminapi exposes herald's token-authenticated HTTP surface:
 //
-//   - Admin-bootstrap endpoints (static admin-token gated) to create the first
-//     org, humans, and agents — solving the chicken-and-egg (you need a human
-//     before a human-held token can provision).
 //   - The SELF-PROVISION tool: POST /api/agents, authenticated by a herald
 //     token. An actor holding a human's (or an agent-with-agent:create's) token
 //     creates a new agent; the new agent's responsible_human is taken FROM THE
 //     CALLER'S VERIFIED TOKEN, never from client input (un-spoofable). This is
 //     the "agent uses a tool to create its own agent account" flow.
+//   - Agent validation: POST /api/agents/{id}/validate (human token).
+//   - by-fingerprint lookup: GET /api/agents/by-fingerprint/{fp}, an in-cluster
+//     service lookup for cairn's SSH ingress.
+//
+// The org/human/agent ADMIN provisioning surface moved to the gRPC AdminService
+// (internal/grpcadmin), fronted by interchange with identity-derived authz —
+// the static admin token it used to carry is retired. This package keeps only
+// the token-authed flows that are NOT admin operations.
 //
 // MVP scope: see the herald MVP spec §2 + the self-provision refinement.
 package adminapi
@@ -15,314 +20,65 @@ package adminapi
 import (
 	"context"
 	"crypto/ed25519"
-	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
 
-	"github.com/CarriedWorldUniverse/herald/internal/identity"
 	"github.com/CarriedWorldUniverse/herald/internal/store"
 )
 
 // ScopeAgentCreate is the capability required to self-provision new agents.
 const ScopeAgentCreate = "agent:create"
 
-// Identity is the subset of identity.Service adminapi needs.
+// Identity is the subset of identity.Service adminapi needs. (Org/human/product
+// admin operations live in the gRPC AdminService now and are not listed here.)
 type Identity interface {
-	CreateOrg(ctx context.Context, name string) (store.Org, error)
-	CreateOrgWithProducts(ctx context.Context, name string, products []string) (store.Org, error)
-	CreateHuman(ctx context.Context, orgID, displayName string) (store.User, error)
 	CreateAgent(ctx context.Context, orgID, displayName, responsibleHuman string, pub ed25519.PublicKey) (store.User, error)
 	CreateAgentPending(ctx context.Context, orgID, displayName, responsibleHuman string, pub ed25519.PublicKey) (store.User, error)
 	ValidateAgent(ctx context.Context, agentID, validatingHuman string) error
 	GrantScope(ctx context.Context, userID, scope, grantedBy string) error
-	SetHumanPassword(ctx context.Context, userID, plaintext string) error
-	GetUser(ctx context.Context, id string) (store.User, error)
-	GetOrg(ctx context.Context, orgID string) (store.Org, error)
 	GetAgentByFingerprint(ctx context.Context, fp string) (store.User, error)
 	EffectiveScopes(ctx context.Context, userID string) ([]string, error)
-	Products(ctx context.Context, orgID string) (map[string]bool, error)
-	EnableProduct(ctx context.Context, orgID, product string) error
-	DisableProduct(ctx context.Context, orgID, product string) error
-	ListOrgs(ctx context.Context) ([]store.Org, error)
-	DeleteOrg(ctx context.Context, id string) error
 }
 
-// TokenIssuer verifies herald tokens and signs new ones. The provider
-// satisfies both (VerifyToken / SignToken).
-type TokenIssuer interface {
+// TokenVerifier verifies herald tokens (the self-provision + validate flows
+// derive the caller's identity from a verified token). The OIDC provider
+// satisfies it.
+type TokenVerifier interface {
 	VerifyToken(token string) (map[string]any, error)
-	SignToken(claims map[string]any) (string, error)
 }
 
-// TokenVerifier is the read-only subset (kept for back-compat in signatures).
-type TokenVerifier = TokenIssuer
-
-// OrgPurger fans an org wipe out to the data pillars (herald's internal/purge).
-type OrgPurger interface {
-	PurgeOrg(ctx context.Context, orgID, purgeToken string) (map[string]string, error)
-}
-
-// API is the provisioning HTTP surface.
+// API is the token-authenticated provisioning HTTP surface.
 type API struct {
-	id         Identity
-	tokens     TokenIssuer
-	adminToken string
-	purger     OrgPurger
+	id     Identity
+	tokens TokenVerifier
 }
 
-// New builds the API. adminToken gates the bootstrap endpoints.
-// purger fans org-delete requests to the data pillars; may be nil in tests that
-// don't exercise DELETE /api/orgs/{id}.
-func New(id Identity, tokens TokenIssuer, adminToken string, purger OrgPurger) *API {
-	return &API{id: id, tokens: tokens, adminToken: adminToken, purger: purger}
+// New builds the API.
+func New(id Identity, tokens TokenVerifier) *API {
+	return &API{id: id, tokens: tokens}
 }
 
-// Handler returns the provisioning mux.
+// Handler returns the provisioning mux. Every route here is either token-authed
+// (self-provision, validate) or an in-cluster service lookup (by-fingerprint);
+// none is gated by a static admin token.
 func (a *API) Handler() http.Handler {
 	mux := http.NewServeMux()
-	// Admin bootstrap (static admin token).
-	mux.HandleFunc("POST /api/orgs", a.adminOnly(a.handleCreateOrg))
-	mux.HandleFunc("GET /api/orgs", a.adminOnly(a.handleListOrgs))
-	mux.HandleFunc("DELETE /api/orgs/{id}", a.adminOnly(a.handleDeleteOrg))
-	mux.HandleFunc("POST /api/orgs/{org}/humans", a.adminOnly(a.handleCreateHuman))
-	mux.HandleFunc("POST /api/orgs/{org}/agents", a.adminOnly(a.handleAdminCreateAgent))
-	mux.HandleFunc("GET /api/orgs/{org}/products", a.adminOnly(a.handleListProducts))
-	mux.HandleFunc("POST /api/orgs/{org}/products/{product}/enable", a.adminOnly(a.handleEnableProduct))
-	mux.HandleFunc("POST /api/orgs/{org}/products/{product}/disable", a.adminOnly(a.handleDisableProduct))
 	// NEX-412: resolve an agent by its casket fingerprint — cairn's SSH ingress
 	// maps an incoming pubkey to a herald agent. NOT admin-gated: this is an
-	// in-cluster SERVICE lookup (cairn → herald.cwb.svc), reached without the
-	// static admin token. It is NOT a gateway public-path, so external callers
-	// still hit the gateway's bearer-auth; only in-cluster services reach it
-	// unauthenticated (the intra-cluster-trust posture — tightened to mesh-mTLS
-	// / a scoped service token later). It returns only id/org/scopes/status.
+	// in-cluster SERVICE lookup (cairn → herald.cwb.svc). It is NOT a gateway
+	// public-path, so external callers still hit the gateway's bearer-auth; only
+	// in-cluster services reach it unauthenticated (the intra-cluster-trust
+	// posture — tightened to mesh-mTLS / a scoped service token later). It
+	// returns only id/org/scopes/status. (cairn now prefers the gRPC
+	// AgentService over mTLS; this HTTP form remains for non-gRPC callers.)
 	mux.HandleFunc("GET /api/agents/by-fingerprint/{fp}", a.handleAgentByFingerprint)
-	// MVP human "login" stand-in: admin mints a human token. Full passkey/
-	// password login is deferred (spec §9); this gives humans a token so they
-	// can validate agents + self-provision now.
-	mux.HandleFunc("POST /api/humans/{id}/token", a.adminOnly(a.handleIssueHumanToken))
-	mux.HandleFunc("POST /api/humans/{id}/password", a.adminOnly(a.handleSetHumanPassword))
 	// Self-provision tool (herald token, agent:create scope) — creates PENDING.
 	mux.HandleFunc("POST /api/agents", a.handleSelfProvisionAgent)
 	// Human validates a pending agent (human token; must be the responsible human).
 	mux.HandleFunc("POST /api/agents/{id}/validate", a.handleValidateAgent)
 	return mux
-}
-
-// --- admin bootstrap ---
-
-func (a *API) handleCreateOrg(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Name     string   `json:"name"`
-		Products []string `json:"products"`
-	}
-	if !decode(w, r, &body) {
-		return
-	}
-	org, err := a.id.CreateOrgWithProducts(r.Context(), body.Name, body.Products)
-	if err != nil {
-		if errors.Is(err, identity.ErrUnknownProduct) {
-			writeErr(w, http.StatusBadRequest, "unknown product")
-			return
-		}
-		writeErr(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"id": org.ID, "name": org.Name})
-}
-
-func (a *API) handleListOrgs(w http.ResponseWriter, r *http.Request) {
-	orgs, err := a.id.ListOrgs(r.Context())
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "list orgs failed")
-		return
-	}
-	out := make([]map[string]any, 0, len(orgs))
-	for _, o := range orgs {
-		out = append(out, map[string]any{"id": o.ID, "name": o.Name, "status": string(o.Status)})
-	}
-	writeJSON(w, http.StatusOK, out)
-}
-
-func (a *API) handleDeleteOrg(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	var body struct {
-		Name string `json:"name"`
-	}
-	if !decode(w, r, &body) {
-		return
-	}
-	org, err := a.id.GetOrg(r.Context(), id)
-	if err != nil {
-		writeErr(w, http.StatusNotFound, "org not found")
-		return
-	}
-	if body.Name == "" || body.Name != org.Name {
-		writeErr(w, http.StatusConflict, "org name confirmation does not match")
-		return
-	}
-	token, err := a.tokens.SignToken(map[string]any{
-		"sub":      "system:purge",
-		"kind":     string(store.KindAgent),
-		"org":      id,
-		"scope":    identity.ScopeOrgPurge,
-		"products": identity.CanonicalProducts,
-	})
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "mint purge token failed")
-		return
-	}
-	pillars, err := a.purger.PurgeOrg(r.Context(), id, token)
-	if err != nil {
-		writeErr(w, http.StatusBadGateway, "pillar purge failed: "+err.Error())
-		return
-	}
-	if err := a.id.DeleteOrg(r.Context(), id); err != nil {
-		writeErr(w, http.StatusInternalServerError, "herald org delete failed: "+err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"deleted": id, "pillars": pillars})
-}
-
-func (a *API) handleListProducts(w http.ResponseWriter, r *http.Request) {
-	orgID := r.PathValue("org")
-	if _, err := a.id.GetOrg(r.Context(), orgID); err != nil {
-		writeErr(w, http.StatusNotFound, "org not found")
-		return
-	}
-	m, err := a.id.Products(r.Context(), orgID)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "products lookup failed")
-		return
-	}
-	writeJSON(w, http.StatusOK, m)
-}
-
-func (a *API) handleEnableProduct(w http.ResponseWriter, r *http.Request)  { a.setProduct(w, r, true) }
-func (a *API) handleDisableProduct(w http.ResponseWriter, r *http.Request) { a.setProduct(w, r, false) }
-
-func (a *API) setProduct(w http.ResponseWriter, r *http.Request, enabled bool) {
-	orgID := r.PathValue("org")
-	product := r.PathValue("product")
-	var err error
-	if enabled {
-		err = a.id.EnableProduct(r.Context(), orgID, product)
-	} else {
-		err = a.id.DisableProduct(r.Context(), orgID, product)
-	}
-	switch {
-	case errors.Is(err, identity.ErrUnknownProduct):
-		writeErr(w, http.StatusBadRequest, "unknown product")
-		return
-	case errors.Is(err, store.ErrNotFound):
-		writeErr(w, http.StatusNotFound, "org not found")
-		return
-	case err != nil:
-		writeErr(w, http.StatusInternalServerError, "set product failed")
-		return
-	}
-	m, err := a.id.Products(r.Context(), orgID)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "products lookup failed")
-		return
-	}
-	writeJSON(w, http.StatusOK, m)
-}
-
-func (a *API) handleCreateHuman(w http.ResponseWriter, r *http.Request) {
-	orgID := r.PathValue("org")
-	var body struct {
-		DisplayName string   `json:"display_name"`
-		Scopes      []string `json:"scopes"`
-	}
-	if !decode(w, r, &body) {
-		return
-	}
-	h, err := a.id.CreateHuman(r.Context(), orgID, body.DisplayName)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	for _, sc := range body.Scopes {
-		if err := a.id.GrantScope(r.Context(), h.ID, sc, h.ID); err != nil {
-			writeErr(w, http.StatusBadRequest, err.Error())
-			return
-		}
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"id": h.ID, "display_name": h.DisplayName, "org": h.OrgID})
-}
-
-// handleAdminCreateAgent is the bootstrap path: admin creates an agent under a
-// named human, with an explicit scope list. Used to mint the first
-// (bootstrap) agent before any agent token exists.
-func (a *API) handleAdminCreateAgent(w http.ResponseWriter, r *http.Request) {
-	orgID := r.PathValue("org")
-	var body agentBody
-	if !decode(w, r, &body) {
-		return
-	}
-	if body.ResponsibleHuman == "" {
-		writeErr(w, http.StatusBadRequest, "responsible_human required")
-		return
-	}
-	// Admin-bootstrap agents are created ACTIVE (they predate any human token
-	// that could validate them — the chicken-and-egg root).
-	a.createAgent(w, r.Context(), orgID, body.ResponsibleHuman, body, false)
-}
-
-// handleIssueHumanToken mints a herald token for a human (MVP login stand-in,
-// admin-gated). The token carries kind=human, the human's org, and their
-// granted scopes — so a human can validate agents + self-provision.
-func (a *API) handleIssueHumanToken(w http.ResponseWriter, r *http.Request) {
-	humanID := r.PathValue("id")
-	human, err := a.id.GetUser(r.Context(), humanID)
-	if err != nil {
-		writeErr(w, http.StatusNotFound, "human not found")
-		return
-	}
-	if human.Kind != store.KindHuman {
-		writeErr(w, http.StatusBadRequest, "not a human")
-		return
-	}
-	scopes, _ := a.id.EffectiveScopes(r.Context(), humanID)
-	claims := map[string]any{
-		"sub":   human.ID,
-		"kind":  string(store.KindHuman),
-		"org":   human.OrgID,
-		"scope": joinFields(scopes),
-	}
-	if human.CasketFingerprint != "" {
-		claims["human_fp"] = human.CasketFingerprint
-	}
-	tok, err := a.tokens.SignToken(claims)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "sign failed")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"access_token": tok, "token_type": "Bearer"})
-}
-
-// handleSetHumanPassword sets a human's login password (admin-gated). bcrypt
-// hashing lives in the identity layer.
-func (a *API) handleSetHumanPassword(w http.ResponseWriter, r *http.Request) {
-	humanID := r.PathValue("id")
-	var body struct {
-		Password string `json:"password"`
-	}
-	if !decode(w, r, &body) {
-		return
-	}
-	if len(body.Password) < 8 {
-		writeErr(w, http.StatusBadRequest, "password must be at least 8 characters")
-		return
-	}
-	if err := a.id.SetHumanPassword(r.Context(), humanID, body.Password); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{})
 }
 
 // --- self-provision tool ---
@@ -394,9 +150,8 @@ func (a *API) handleValidateAgent(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"id": agentID, "status": "active"})
 }
 
-// createAgent is shared by the admin + self-provision paths: decode pubkey,
-// create the agent (pending or active), grant requested scopes (granter = the
-// responsible human).
+// createAgent decodes the pubkey, creates the agent (pending or active), and
+// grants requested scopes (granter = the responsible human).
 func (a *API) createAgent(w http.ResponseWriter, ctx context.Context, orgID, responsibleHuman string, body agentBody, pending bool) {
 	pub, err := body.pubkey()
 	if err != nil {
@@ -474,7 +229,7 @@ func (a *API) handleAgentByFingerprint(w http.ResponseWriter, r *http.Request) {
 
 type agentBody struct {
 	DisplayName      string   `json:"display_name"`
-	ResponsibleHuman string   `json:"responsible_human"` // admin path only; ignored on self-provision
+	ResponsibleHuman string   `json:"responsible_human"` // ignored on self-provision (derived from token)
 	CasketPubkey     string   `json:"casket_pubkey"`     // base64 (std)
 	Scopes           []string `json:"scopes"`
 }
@@ -491,17 +246,6 @@ func (b agentBody) pubkey() (ed25519.PublicKey, error) {
 		return nil, errors.New("casket_pubkey must be a 32-byte ed25519 key")
 	}
 	return ed25519.PublicKey(raw), nil
-}
-
-func (a *API) adminOnly(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		tok := bearer(r)
-		if tok == "" || subtle.ConstantTimeCompare([]byte(tok), []byte(a.adminToken)) != 1 {
-			writeErr(w, http.StatusUnauthorized, "admin token required")
-			return
-		}
-		next(w, r)
-	}
 }
 
 func (a *API) verifyBearer(r *http.Request) (map[string]any, error) {
@@ -528,17 +272,6 @@ func claimsHaveScope(claims map[string]any, want string) bool {
 		}
 	}
 	return false
-}
-
-func joinFields(ss []string) string {
-	out := ""
-	for i, s := range ss {
-		if i > 0 {
-			out += " "
-		}
-		out += s
-	}
-	return out
 }
 
 func splitFields(s string) []string {

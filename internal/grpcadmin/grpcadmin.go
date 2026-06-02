@@ -17,15 +17,46 @@ package grpcadmin
 
 import (
 	"context"
+	"crypto/ed25519"
 	"strings"
 
 	heraldv1 "github.com/CarriedWorldUniverse/cwb-proto/gen/go/cwb/herald/v1"
-	"github.com/CarriedWorldUniverse/herald/internal/adminapi"
+	"github.com/CarriedWorldUniverse/herald/internal/store"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
+
+// Identity is the full org/human/agent/product admin surface the gRPC
+// AdminService + genesis seeding drive. (identity.Service satisfies it.)
+type Identity interface {
+	CreateOrg(ctx context.Context, name string) (store.Org, error)
+	CreateOrgWithProducts(ctx context.Context, name string, products []string) (store.Org, error)
+	CreateHuman(ctx context.Context, orgID, displayName string) (store.User, error)
+	CreateAgent(ctx context.Context, orgID, displayName, responsibleHuman string, pub ed25519.PublicKey) (store.User, error)
+	GrantScope(ctx context.Context, userID, scope, grantedBy string) error
+	SetHumanPassword(ctx context.Context, userID, plaintext string) error
+	GetUser(ctx context.Context, id string) (store.User, error)
+	GetOrg(ctx context.Context, orgID string) (store.Org, error)
+	GetAgentByFingerprint(ctx context.Context, fp string) (store.User, error)
+	EffectiveScopes(ctx context.Context, userID string) ([]string, error)
+	Products(ctx context.Context, orgID string) (map[string]bool, error)
+	EnableProduct(ctx context.Context, orgID, product string) error
+	DisableProduct(ctx context.Context, orgID, product string) error
+	ListOrgs(ctx context.Context) ([]store.Org, error)
+	DeleteOrg(ctx context.Context, id string) error
+}
+
+// TokenSigner signs herald tokens (the DeleteOrg fan-out mints a purge token).
+type TokenSigner interface {
+	SignToken(claims map[string]any) (string, error)
+}
+
+// OrgPurger fans an org wipe out to the data pillars (herald's internal/purge).
+type OrgPurger interface {
+	PurgeOrg(ctx context.Context, orgID, purgeToken string) (map[string]string, error)
+}
 
 // Admin scopes (identity-derived authority; replace the static admin token).
 const (
@@ -107,13 +138,13 @@ func requireOrgAdmin(ctx context.Context, targetOrg string) (caller, error) {
 // Servers bundles herald's gRPC service implementations over the existing
 // identity / token / purger backends (the same ones adminapi uses).
 type Servers struct {
-	id     adminapi.Identity
-	tokens adminapi.TokenIssuer
-	purger adminapi.OrgPurger
+	id     Identity
+	tokens TokenSigner
+	purger OrgPurger
 }
 
 // New builds the gRPC service implementations.
-func New(id adminapi.Identity, tokens adminapi.TokenIssuer, purger adminapi.OrgPurger) *Servers {
+func New(id Identity, tokens TokenSigner, purger OrgPurger) *Servers {
 	return &Servers{id: id, tokens: tokens, purger: purger}
 }
 

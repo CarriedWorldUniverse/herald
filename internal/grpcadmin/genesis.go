@@ -3,8 +3,6 @@ package grpcadmin
 import (
 	"context"
 	"fmt"
-
-	"github.com/CarriedWorldUniverse/herald/internal/adminapi"
 )
 
 // SeedConfig configures genesis — the admin (administration) org + its platform-
@@ -22,7 +20,7 @@ type SeedConfig struct {
 // owner's user id (log it for login). With an empty password and no existing
 // admin org it returns an error so the operator knows to supply the secret;
 // callers may treat that as a warn-and-continue during the transition.
-func Seed(ctx context.Context, id adminapi.Identity, cfg SeedConfig) (ownerID string, err error) {
+func Seed(ctx context.Context, id Identity, cfg SeedConfig) (ownerID string, err error) {
 	if cfg.AdminOrgName == "" || cfg.OwnerDisplayName == "" {
 		return "", fmt.Errorf("genesis: AdminOrgName and OwnerDisplayName required")
 	}

@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	heraldv1 "github.com/CarriedWorldUniverse/cwb-proto/gen/go/cwb/herald/v1"
-	"github.com/CarriedWorldUniverse/herald/internal/adminapi"
 	"github.com/CarriedWorldUniverse/herald/internal/identity"
 	"github.com/CarriedWorldUniverse/herald/internal/store"
 	"google.golang.org/grpc"
@@ -31,7 +30,7 @@ func (fakePurger) PurgeOrg(context.Context, string, string) (map[string]string, 
 	return map[string]string{}, nil
 }
 
-func newID(t *testing.T) adminapi.Identity {
+func newID(t *testing.T) Identity {
 	t.Helper()
 	st, err := store.Open(":memory:")
 	if err != nil {
@@ -78,7 +77,7 @@ func TestSeed(t *testing.T) {
 
 // --- gRPC authz matrix (bufconn) ---
 
-func dialServers(t *testing.T, id adminapi.Identity) heraldv1.AdminServiceClient {
+func dialServers(t *testing.T, id Identity) heraldv1.AdminServiceClient {
 	t.Helper()
 	lis := bufconn.Listen(1 << 20)
 	g := grpc.NewServer()
