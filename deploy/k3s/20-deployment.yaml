@@ -24,9 +24,20 @@ spec:
           ports:
             - name: http
               containerPort: 8099
+            - name: grpc
+              containerPort: 8098
           env:
             - name: HERALD_ADDR
               value: ":8099"
+            # gRPC admin/internal API (Phase 4) over mTLS, fronted by interchange.
+            - name: HERALD_GRPC_ADDR
+              value: ":8098"
+            - name: HERALD_TLS_CERT
+              value: "/etc/cwb/tls/tls.crt"
+            - name: HERALD_TLS_KEY
+              value: "/etc/cwb/tls/tls.key"
+            - name: HERALD_TLS_CA
+              value: "/etc/cwb/tls/ca.crt"
             - name: HERALD_DB
               value: "/var/lib/nexus/herald.db"
             - name: HERALD_ISSUER
@@ -46,9 +57,22 @@ spec:
                   name: herald-secrets
                   key: signing_key
                   optional: true
+            # Genesis (Phase 4): the admin-org owner password, supplied at deploy
+            # time from a secret — NO default account/password ships in the image.
+            # Optional so herald boots even before the secret is set (genesis
+            # warns-and-skips); set it to seed cwadmin@carriedworld.com.
+            - name: HERALD_GENESIS_OWNER_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: herald-secrets
+                  key: genesis_owner_password
+                  optional: true
           volumeMounts:
             - name: data
               mountPath: /var/lib/nexus
+            - name: tls
+              mountPath: /etc/cwb/tls
+              readOnly: true
           readinessProbe:
             httpGet:
               path: /healthz
@@ -65,3 +89,6 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: herald-data
+        - name: tls
+          secret:
+            secretName: herald-tls
