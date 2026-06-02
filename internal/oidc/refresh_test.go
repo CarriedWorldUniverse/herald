@@ -141,3 +141,49 @@ func TestRefreshGrant_EndToEnd(t *testing.T) {
 		t.Fatalf("successor after replay should be rejected: %+v", r3)
 	}
 }
+
+func TestRevokeEndpoint(t *testing.T) {
+	ctx := context.Background()
+	st, _ := store.Open(":memory:")
+	t.Cleanup(func() { _ = st.Close() })
+	svc := identity.New(st)
+	org, _ := st.CreateOrg(ctx, "acme")
+	h, _ := svc.CreateHuman(ctx, org.ID, "alice")
+	_ = svc.SetHumanPassword(ctx, h.ID, "hunter2hunter2")
+
+	_, signKey, _ := ed25519.GenerateKey(nil)
+	p, _ := NewProvider(Config{Issuer: "http://h/", SigningKey: signKey})
+	refresh := NewRefreshIssuer(p, st, 0)
+	p.SetTokenHandler(NewGrantMux(NewAgentGrant(p, svc, refresh), NewHumanGrant(p, svc, refresh), NewRefreshGrant(p, svc, refresh)))
+	p.SetRevokeHandler(NewRevokeHandler(refresh))
+	srv := httptest.NewServer(p.Handler())
+	t.Cleanup(srv.Close)
+
+	post := func(path string, form url.Values) (int, map[string]any) {
+		resp, err := http.Post(srv.URL+path, "application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
+		if err != nil {
+			t.Fatalf("POST %s: %v", path, err)
+		}
+		defer resp.Body.Close()
+		var out map[string]any
+		_ = json.NewDecoder(resp.Body).Decode(&out)
+		return resp.StatusCode, out
+	}
+
+	_, login := post("/token", url.Values{"grant_type": {"password"}, "username": {h.ID}, "password": {"hunter2hunter2"}})
+	rtok, _ := login["refresh_token"].(string)
+
+	code, _ := post("/revoke", url.Values{"token": {rtok}})
+	if code != http.StatusOK {
+		t.Fatalf("revoke status = %d, want 200", code)
+	}
+	// Revoked -> refresh now fails.
+	_, after := post("/token", url.Values{"grant_type": {"refresh_token"}, "refresh_token": {rtok}})
+	if after["error"] == nil {
+		t.Fatalf("refresh after revoke should fail: %+v", after)
+	}
+	// Idempotent + no enumeration: revoking garbage is still 200.
+	if code, _ := post("/revoke", url.Values{"token": {"garbage"}}); code != http.StatusOK {
+		t.Fatalf("revoke garbage status = %d, want 200", code)
+	}
+}

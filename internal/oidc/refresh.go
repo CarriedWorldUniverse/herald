@@ -144,6 +144,25 @@ func sha256hex(s string) string {
 	return fmt.Sprintf("%x", sum)
 }
 
+// RevokeHandler implements RFC 7009-style revocation for refresh tokens. Always
+// 200 (idempotent, no token enumeration).
+type RevokeHandler struct {
+	refresh *RefreshIssuer
+}
+
+func NewRevokeHandler(refresh *RefreshIssuer) *RevokeHandler { return &RevokeHandler{refresh: refresh} }
+
+func (h *RevokeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		oauthError(w, http.StatusBadRequest, "invalid_request", "unparseable form")
+		return
+	}
+	if tok := r.Form.Get("token"); tok != "" {
+		h.refresh.revoke(r.Context(), tok)
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
 // RefreshGrant implements grant_type=refresh_token: validate the presented
 // refresh token, REBUILD the access-token claims from the user record (so
 // scope/product/block changes take effect), rotate the refresh token, and

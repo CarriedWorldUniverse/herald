@@ -71,6 +71,7 @@ func main() {
 		oidc.NewHumanGrant(provider, idsvc, refresh),
 		oidc.NewRefreshGrant(provider, idsvc, refresh),
 	))
+	provider.SetRevokeHandler(oidc.NewRevokeHandler(refresh))
 
 	gatewayBase := os.Getenv("HERALD_GATEWAY_URL")
 	if gatewayBase == "" {
