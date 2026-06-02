@@ -48,3 +48,19 @@ CREATE TABLE IF NOT EXISTS org_product (
   updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   PRIMARY KEY (org_id, product)
 );
+
+-- Refresh tokens (rotating). The opaque token handed to a client is
+-- "<id>.<secret>"; only sha256(secret) is stored. chain_id groups a rotation
+-- lineage so the whole chain can be revoked (logout, or replay of a rotated
+-- token). A row is valid when revoked_at IS NULL and expires_at is in future.
+CREATE TABLE IF NOT EXISTS refresh_token (
+  id          TEXT PRIMARY KEY,                 -- public handle (random hex)
+  chain_id    TEXT NOT NULL,                    -- rotation-lineage root id
+  token_hash  TEXT NOT NULL,                    -- hex sha256 of the secret
+  user_id     TEXT NOT NULL REFERENCES user(id),
+  issued_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  expires_at  TEXT NOT NULL,                    -- RFC3339 (UTC)
+  revoked_at  TEXT                              -- NULL until revoked
+);
+CREATE INDEX IF NOT EXISTS idx_refresh_chain ON refresh_token(chain_id);
+CREATE INDEX IF NOT EXISTS idx_refresh_user  ON refresh_token(user_id);
