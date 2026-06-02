@@ -3,7 +3,6 @@ package oidc
 import (
 	"context"
 	"net/http"
-	"strings"
 
 	"github.com/CarriedWorldUniverse/herald/internal/store"
 )
@@ -13,11 +12,11 @@ import (
 // v0, with auth-code + passkey as the hardening path.
 const passwordGrant = "password"
 
-// HumanResolver is the slice of the identity service the human grant needs.
+// HumanResolver is the slice of the identity service the human grant needs:
+// password verification plus the shared claim-building resolver.
 type HumanResolver interface {
 	VerifyHumanPassword(ctx context.Context, userID, plaintext string) (store.User, error)
-	EffectiveScopes(ctx context.Context, userID string) ([]string, error)
-	EnabledProducts(ctx context.Context, orgID string) ([]string, error)
+	IdentityResolver
 }
 
 // HumanGrant implements the password token endpoint: a human presents their
@@ -50,23 +49,12 @@ func (g *HumanGrant) ServeToken(w http.ResponseWriter, r *http.Request) {
 		oauthError(w, http.StatusUnauthorized, "invalid_grant", "login rejected")
 		return
 	}
-	scopes, err := g.id.EffectiveScopes(r.Context(), u.ID)
+	claims, err := accessClaims(r.Context(), g.id, u)
 	if err != nil {
 		oauthError(w, http.StatusUnauthorized, "invalid_grant", "login rejected")
 		return
 	}
-	products, err := g.id.EnabledProducts(r.Context(), u.OrgID)
-	if err != nil {
-		oauthError(w, http.StatusUnauthorized, "invalid_grant", "login rejected")
-		return
-	}
-	tok, err := g.p.SignToken(map[string]any{
-		"sub":      u.ID,
-		"kind":     string(store.KindHuman),
-		"org":      u.OrgID,
-		"scope":    strings.Join(scopes, " "),
-		"products": products,
-	})
+	tok, err := g.p.SignToken(claims)
 	if err != nil {
 		oauthError(w, http.StatusInternalServerError, "server_error", "token signing failed")
 		return

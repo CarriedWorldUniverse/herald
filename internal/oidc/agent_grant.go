@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	jose "github.com/go-jose/go-jose/v4"
@@ -125,27 +124,9 @@ func (g *AgentGrant) issue(ctx context.Context, assertion, tokenURL string) (str
 
 	// 6. Assemble the access token. act.sub, org, fingerprints come FROM THE
 	//    RECORD — client-supplied values in the assertion are ignored.
-	scopes, err := g.id.EffectiveScopes(ctx, agent.ID)
+	out, err := accessClaims(ctx, g.id, agent)
 	if err != nil {
-		return "", fmt.Errorf("scopes: %w", err)
-	}
-	products, err := g.id.EnabledProducts(ctx, agent.OrgID)
-	if err != nil {
-		return "", fmt.Errorf("products: %w", err)
-	}
-	out := map[string]any{
-		"sub":      agent.ID,
-		"kind":     string(store.KindAgent),
-		"org":      agent.OrgID,
-		"scope":    strings.Join(scopes, " "),
-		"products": products,
-		"agent_fp": agent.CasketFingerprint,
-	}
-	if agent.ResponsibleHuman != "" {
-		out["act"] = map[string]any{"sub": agent.ResponsibleHuman}
-		if human, err := g.id.GetUser(ctx, agent.ResponsibleHuman); err == nil && human.CasketFingerprint != "" {
-			out["human_fp"] = human.CasketFingerprint
-		}
+		return "", fmt.Errorf("claims: %w", err)
 	}
 	return g.p.SignToken(out)
 }
