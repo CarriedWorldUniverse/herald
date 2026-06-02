@@ -93,6 +93,10 @@ type Store interface {
 	CreateUser(ctx context.Context, u User) (User, error)
 	GetUser(ctx context.Context, id string) (User, error)
 	GetUserByCasketFingerprint(ctx context.Context, fp string) (User, error)
+	// GetUserByDisplayName resolves a HUMAN by display name (e.g. an email used
+	// as the login username). Returns ErrNotFound if zero OR more than one human
+	// matches (ambiguous logins must fail closed, never resolve to a wrong user).
+	GetUserByDisplayName(ctx context.Context, displayName string) (User, error)
 	ListAgentsByResponsibleHuman(ctx context.Context, humanID string) ([]User, error)
 	SetUserStatus(ctx context.Context, id string, s Status) error
 	SetLoginSecret(ctx context.Context, id, hash string) error

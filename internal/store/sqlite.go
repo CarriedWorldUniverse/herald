@@ -107,6 +107,33 @@ func (s *SQLite) GetUserByCasketFingerprint(ctx context.Context, fp string) (Use
 	return s.scanUser(s.db.QueryRowContext(ctx, userSelect+` WHERE casket_fingerprint = ?`, fp))
 }
 
+// GetUserByDisplayName resolves a human by display name (login-by-email). It
+// matches kind='human' only and requires EXACTLY one match — zero or many both
+// yield ErrNotFound, so an ambiguous display name can never resolve to a wrong
+// user.
+func (s *SQLite) GetUserByDisplayName(ctx context.Context, displayName string) (User, error) {
+	rows, err := s.db.QueryContext(ctx, userSelect+` WHERE display_name = ? AND kind = 'human' LIMIT 2`, displayName)
+	if err != nil {
+		return User{}, fmt.Errorf("GetUserByDisplayName: %w", err)
+	}
+	defer rows.Close()
+	var found []User
+	for rows.Next() {
+		u, err := scanUserRow(rows)
+		if err != nil {
+			return User{}, err
+		}
+		found = append(found, u)
+	}
+	if err := rows.Err(); err != nil {
+		return User{}, err
+	}
+	if len(found) != 1 {
+		return User{}, ErrNotFound // 0 (none) or >1 (ambiguous) both fail closed
+	}
+	return found[0], nil
+}
+
 func (s *SQLite) ListAgentsByResponsibleHuman(ctx context.Context, humanID string) ([]User, error) {
 	rows, err := s.db.QueryContext(ctx, userSelect+` WHERE responsible_human = ?`, humanID)
 	if err != nil {

@@ -185,15 +185,21 @@ func (svc *Service) SetHumanPassword(ctx context.Context, userID, plaintext stri
 
 // VerifyHumanPassword returns the user iff it is an active human whose stored
 // bcrypt hash matches plaintext. Every failure returns ErrInvalidCredentials.
-func (svc *Service) VerifyHumanPassword(ctx context.Context, userID, plaintext string) (store.User, error) {
-	u, err := svc.store.GetUser(ctx, userID)
+func (svc *Service) VerifyHumanPassword(ctx context.Context, username, plaintext string) (store.User, error) {
+	// Resolve by id first (back-compat), then fall back to a unique display-name
+	// (email) match — so humans can log in as e.g. cwadmin@carriedworld.com, not
+	// only by UUID. Ambiguous/absent both surface as ErrInvalidCredentials.
+	u, err := svc.store.GetUser(ctx, username)
 	if err != nil {
-		return store.User{}, ErrInvalidCredentials
+		u, err = svc.store.GetUserByDisplayName(ctx, username)
+		if err != nil {
+			return store.User{}, ErrInvalidCredentials
+		}
 	}
 	if u.Kind != store.KindHuman || u.LoginSecret == "" {
 		return store.User{}, ErrInvalidCredentials
 	}
-	if !svc.IsActive(ctx, userID) {
+	if !svc.IsActive(ctx, u.ID) {
 		return store.User{}, ErrInvalidCredentials
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(u.LoginSecret), []byte(plaintext)); err != nil {
