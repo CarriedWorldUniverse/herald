@@ -86,10 +86,11 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"ok","service":"herald"}`))
 	})
-	// OIDC endpoints: discovery, JWKS, token.
+	// OIDC endpoints: discovery, JWKS, token, revoke.
 	mux.Handle("/.well-known/", provider.Handler())
 	mux.Handle("/jwks", provider.Handler())
 	mux.Handle("/token", provider.Handler())
+	mux.Handle("/revoke", provider.Handler())
 	// Token-authed provisioning (self-provision, validate) + the in-cluster
 	// by-fingerprint lookup. The org/human/product admin surface lives in the
 	// gRPC AdminService below (identity-derived authz, no static admin token).

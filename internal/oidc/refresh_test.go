@@ -144,7 +144,10 @@ func TestRefreshGrant_EndToEnd(t *testing.T) {
 
 func TestRevokeEndpoint(t *testing.T) {
 	ctx := context.Background()
-	st, _ := store.Open(":memory:")
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
 	t.Cleanup(func() { _ = st.Close() })
 	svc := identity.New(st)
 	org, _ := st.CreateOrg(ctx, "acme")
