@@ -18,19 +18,28 @@
 package main
 
 import (
+	"context"
 	"crypto/ed25519"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/CarriedWorldUniverse/herald/internal/adminapi"
+	"github.com/CarriedWorldUniverse/herald/internal/grpcadmin"
 	"github.com/CarriedWorldUniverse/herald/internal/identity"
 	"github.com/CarriedWorldUniverse/herald/internal/oidc"
 	"github.com/CarriedWorldUniverse/herald/internal/purge"
 	"github.com/CarriedWorldUniverse/herald/internal/store"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/health"
+	grpc_health_v1 "google.golang.org/grpc/health/grpc_health_v1"
 )
 
 func main() {
@@ -84,10 +93,86 @@ func main() {
 	// Provisioning + admin.
 	mux.Handle("/api/", api.Handler())
 
+	// Genesis (Phase 4): idempotently provision the admin (administration) org +
+	// platform-admin owner from a deploy secret — no shipped default account or
+	// password. No-op if the admin org already exists or the secret is unset.
+	if ownerID, gErr := grpcadmin.Seed(context.Background(), idsvc, grpcadmin.SeedConfig{
+		AdminOrgName:     env("HERALD_GENESIS_ORG", "cwb-admin"),
+		OwnerDisplayName: env("HERALD_GENESIS_OWNER", "cwadmin@carriedworld.com"),
+		OwnerPassword:    os.Getenv("HERALD_GENESIS_OWNER_PASSWORD"),
+	}); gErr != nil {
+		log.Printf("herald: genesis skipped: %v", gErr)
+	} else if ownerID != "" {
+		log.Printf("herald: genesis seeded admin-org owner (login username = id %s) with %s", ownerID, grpcadmin.ScopePlatformAdmin)
+	}
+
+	// gRPC admin/internal API (Phase 4) over mTLS, fronted by interchange. OPT-IN:
+	// it starts only when mTLS certs are configured (or the dev opt-in is set),
+	// so until step-4 wires the certs herald runs HTTP-only exactly as before.
+	// The HTTP OIDC + admin API above are unchanged; the static-admin-token path
+	// is retained during the transition and removed in the cleanup.
+	if os.Getenv("HERALD_TLS_CERT") != "" || os.Getenv("HERALD_DEV_INSECURE") == "1" {
+		grpcAddr := env("HERALD_GRPC_ADDR", ":8098")
+		grpcSrv := grpc.NewServer(heraldGRPCServerOptions()...)
+		grpcadmin.New(idsvc, provider, purger).Register(grpcSrv)
+		healthSrv := health.NewServer()
+		grpc_health_v1.RegisterHealthServer(grpcSrv, healthSrv)
+		for _, svc := range []string{"cwb.herald.v1.AdminService", "cwb.herald.v1.AgentService"} {
+			healthSrv.SetServingStatus(svc, grpc_health_v1.HealthCheckResponse_SERVING)
+		}
+		grpcLn, lErr := net.Listen("tcp", grpcAddr)
+		if lErr != nil {
+			log.Fatalf("herald: grpc listen %s: %v", grpcAddr, lErr)
+		}
+		go func() {
+			log.Printf("herald grpc (admin) listening on %s", grpcAddr)
+			if err := grpcSrv.Serve(grpcLn); err != nil {
+				log.Fatalf("herald: grpc: %v", err)
+			}
+		}()
+	} else {
+		log.Printf("herald: gRPC admin disabled (set HERALD_TLS_* or HERALD_DEV_INSECURE=1 to enable)")
+	}
+
 	log.Printf("herald listening on %s (issuer=%s, db=%s)", addr, issuer, dbPath)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatalf("herald: %v", err)
 	}
+}
+
+// heraldGRPCServerOptions builds herald's gRPC server options. With HERALD_TLS_*
+// set it enforces mTLS (RequireAndVerifyClientCert vs the cwb-ca); a partial cert
+// set is fatal; HERALD_DEV_INSECURE=1 (and no certs) runs insecure for local dev.
+// Mirrors the other pillars.
+func heraldGRPCServerOptions() []grpc.ServerOption {
+	certFile := os.Getenv("HERALD_TLS_CERT")
+	keyFile := os.Getenv("HERALD_TLS_KEY")
+	caFile := os.Getenv("HERALD_TLS_CA")
+	if certFile == "" || keyFile == "" || caFile == "" {
+		if os.Getenv("HERALD_DEV_INSECURE") == "1" {
+			log.Printf("herald: HERALD_DEV_INSECURE=1 — gRPC admin WITHOUT mTLS (dev only)")
+			return nil
+		}
+		log.Fatalf("herald: gRPC mTLS requires HERALD_TLS_CERT/_KEY/_CA (or HERALD_DEV_INSECURE=1)")
+	}
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		log.Fatalf("herald: tls: load cert/key: %v", err)
+	}
+	caPEM, err := os.ReadFile(caFile)
+	if err != nil {
+		log.Fatalf("herald: tls: read CA: %v", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caPEM) {
+		log.Fatalf("herald: tls: no certs parsed from CA file %s", caFile)
+	}
+	return []grpc.ServerOption{grpc.Creds(credentials.NewTLS(&tls.Config{
+		Certificates: []tls.Certificate{cert},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:    pool,
+		MinVersion:   tls.VersionTLS13,
+	}))}
 }
 
 func env(key, def string) string {
