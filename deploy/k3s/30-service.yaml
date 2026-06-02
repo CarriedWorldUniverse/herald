@@ -14,3 +14,8 @@ spec:
       port: 8099
       targetPort: http
       protocol: TCP
+    # gRPC admin/internal API (mTLS) — interchange + cairn dial herald.cwb.svc:8098.
+    - name: grpc
+      port: 8098
+      targetPort: grpc
+      protocol: TCP
