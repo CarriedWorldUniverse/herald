@@ -11,6 +11,7 @@
 //	HERALD_DB           sqlite path (default /var/lib/nexus/herald.db; ":memory:" ok)
 //	HERALD_ISSUER       OIDC issuer URL (default http://<addr>/) — set to the
 //	                    externally-reachable https URL in production
+//	HERALD_REFRESH_TTL  refresh-token lifetime (Go duration, e.g. "720h"; default 30d)
 //	HERALD_SIGNING_KEY  base64(std) Ed25519 private key (64 bytes). If unset, a
 //	                    key is generated on boot and its public JWKS logged —
 //	                    fine for dev, NOT for prod (tokens won't survive restart).
@@ -63,10 +64,14 @@ func main() {
 	if err != nil {
 		log.Fatalf("herald: provider: %v", err)
 	}
+	refreshTTL := envDuration("HERALD_REFRESH_TTL", 0) // 0 -> issuer default (30d)
+	refresh := oidc.NewRefreshIssuer(provider, st, refreshTTL)
 	provider.SetTokenHandler(oidc.NewGrantMux(
-		oidc.NewAgentGrant(provider, idsvc),
-		oidc.NewHumanGrant(provider, idsvc),
+		oidc.NewAgentGrant(provider, idsvc, refresh),
+		oidc.NewHumanGrant(provider, idsvc, refresh),
+		oidc.NewRefreshGrant(provider, idsvc, refresh),
 	))
+	provider.SetRevokeHandler(oidc.NewRevokeHandler(refresh))
 
 	gatewayBase := os.Getenv("HERALD_GATEWAY_URL")
 	if gatewayBase == "" {
@@ -81,10 +86,11 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"ok","service":"herald"}`))
 	})
-	// OIDC endpoints: discovery, JWKS, token.
+	// OIDC endpoints: discovery, JWKS, token, revoke.
 	mux.Handle("/.well-known/", provider.Handler())
 	mux.Handle("/jwks", provider.Handler())
 	mux.Handle("/token", provider.Handler())
+	mux.Handle("/revoke", provider.Handler())
 	// Token-authed provisioning (self-provision, validate) + the in-cluster
 	// by-fingerprint lookup. The org/human/product admin surface lives in the
 	// gRPC AdminService below (identity-derived authz, no static admin token).
@@ -175,6 +181,16 @@ func heraldGRPCServerOptions() []grpc.ServerOption {
 func env(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return def
+}
+
+func envDuration(key string, def time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+		log.Printf("herald: ignoring invalid %s=%q", key, v)
 	}
 	return def
 }

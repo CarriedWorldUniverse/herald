@@ -37,7 +37,7 @@ func testStack(t *testing.T) (*herald.Provider, *identity.Service, *httptest.Ser
 	if err != nil {
 		t.Fatalf("NewProvider: %v", err)
 	}
-	p.SetTokenHandler(herald.NewAgentGrant(p, svc))
+	p.SetTokenHandler(herald.NewAgentGrant(p, svc, nil))
 	srv := httptest.NewServer(p.Handler())
 	t.Cleanup(srv.Close)
 	return p, svc, srv

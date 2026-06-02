@@ -75,6 +75,18 @@ type ScopeGrant struct {
 	CreatedAt string
 }
 
+// RefreshToken is a persisted, rotating refresh token. The plaintext secret is
+// never stored — only TokenHash (hex sha256). RevokedAt is empty when live.
+type RefreshToken struct {
+	ID        string
+	ChainID   string
+	TokenHash string
+	UserID    string
+	IssuedAt  string
+	ExpiresAt string // RFC3339 UTC
+	RevokedAt string // empty == not revoked
+}
+
 // Store is herald's persistence seam. Implementations MUST be safe for
 // concurrent use.
 type Store interface {
@@ -106,6 +118,13 @@ type Store interface {
 	GrantScope(ctx context.Context, userID, scope, grantedBy string) (ScopeGrant, error)
 	RevokeScope(ctx context.Context, userID, scope string) error
 	ListScopes(ctx context.Context, userID string) ([]string, error)
+
+	// Refresh tokens (rotating; see RefreshToken).
+	CreateRefreshToken(ctx context.Context, rt RefreshToken) error
+	GetRefreshToken(ctx context.Context, id string) (RefreshToken, error)
+	// RevokeRefreshChain marks every still-live row in the chain revoked.
+	// Idempotent.
+	RevokeRefreshChain(ctx context.Context, chainID string) error
 
 	// Product entitlement (deny-list: an absent row OR enabled=1 means
 	// the product is enabled for the org).

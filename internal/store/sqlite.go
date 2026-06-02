@@ -215,6 +215,46 @@ func (s *SQLite) ListScopes(ctx context.Context, userID string) ([]string, error
 	return out, rows.Err()
 }
 
+func (s *SQLite) CreateRefreshToken(ctx context.Context, rt RefreshToken) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO refresh_token (id, chain_id, token_hash, user_id, expires_at)
+		 VALUES (?, ?, ?, ?, ?)`,
+		rt.ID, rt.ChainID, rt.TokenHash, rt.UserID, rt.ExpiresAt)
+	if err != nil {
+		return fmt.Errorf("CreateRefreshToken: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLite) GetRefreshToken(ctx context.Context, id string) (RefreshToken, error) {
+	var rt RefreshToken
+	var revoked sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, chain_id, token_hash, user_id, issued_at, expires_at, revoked_at
+		   FROM refresh_token WHERE id = ?`, id).
+		Scan(&rt.ID, &rt.ChainID, &rt.TokenHash, &rt.UserID, &rt.IssuedAt, &rt.ExpiresAt, &revoked)
+	if errors.Is(err, sql.ErrNoRows) {
+		return RefreshToken{}, ErrNotFound
+	}
+	if err != nil {
+		return RefreshToken{}, fmt.Errorf("GetRefreshToken: %w", err)
+	}
+	rt.RevokedAt = revoked.String
+	return rt, nil
+}
+
+func (s *SQLite) RevokeRefreshChain(ctx context.Context, chainID string) error {
+	// RFC3339 UTC to match expires_at's format (so RevokedAt is parseable by
+	// any consumer, not just emptiness-checked).
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE refresh_token SET revoked_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+		   WHERE chain_id = ? AND revoked_at IS NULL`, chainID)
+	if err != nil {
+		return fmt.Errorf("RevokeRefreshChain: %w", err)
+	}
+	return nil
+}
+
 // --- scan helpers ---
 
 const userSelect = `SELECT id, org_id, kind, display_name, status,
@@ -293,6 +333,10 @@ func (s *SQLite) DeleteOrg(ctx context.Context, id string) error {
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM org_product WHERE org_id=?`, id); err != nil {
 		return fmt.Errorf("DeleteOrg: org_product: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM refresh_token WHERE user_id IN (SELECT id FROM user WHERE org_id=?)`, id); err != nil {
+		return fmt.Errorf("DeleteOrg: refresh_token: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM user WHERE org_id=?`, id); err != nil {
 		return fmt.Errorf("DeleteOrg: user: %w", err)

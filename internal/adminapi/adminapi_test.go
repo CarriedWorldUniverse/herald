@@ -41,7 +41,7 @@ func newStack(t *testing.T) (*identity.Service, *herald.Provider, *httptest.Serv
 	srv := httptest.NewServer(nil)
 	t.Cleanup(srv.Close)
 	p, _ := herald.NewProvider(herald.Config{Issuer: srv.URL + "/", SigningKey: signKey})
-	grant := herald.NewAgentGrant(p, svc)
+	grant := herald.NewAgentGrant(p, svc, nil)
 	p.SetTokenHandler(grant)
 
 	api := adminapi.New(svc, p)

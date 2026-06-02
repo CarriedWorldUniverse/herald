@@ -2,8 +2,8 @@ package oidc
 
 import (
 	"context"
+	"log"
 	"net/http"
-	"strings"
 
 	"github.com/CarriedWorldUniverse/herald/internal/store"
 )
@@ -13,24 +13,25 @@ import (
 // v0, with auth-code + passkey as the hardening path.
 const passwordGrant = "password"
 
-// HumanResolver is the slice of the identity service the human grant needs.
+// HumanResolver is the slice of the identity service the human grant needs:
+// password verification plus the shared claim-building resolver.
 type HumanResolver interface {
 	VerifyHumanPassword(ctx context.Context, userID, plaintext string) (store.User, error)
-	EffectiveScopes(ctx context.Context, userID string) ([]string, error)
-	EnabledProducts(ctx context.Context, orgID string) ([]string, error)
+	IdentityResolver
 }
 
 // HumanGrant implements the password token endpoint: a human presents their
 // user id + password; herald verifies the bcrypt hash and issues a kind:human
 // access token. Mirrors AgentGrant's shape.
 type HumanGrant struct {
-	p  *Provider
-	id HumanResolver
+	p       *Provider
+	id      HumanResolver
+	refresh *RefreshIssuer
 }
 
 // NewHumanGrant wires the grant to a provider + human resolver.
-func NewHumanGrant(p *Provider, id HumanResolver) *HumanGrant {
-	return &HumanGrant{p: p, id: id}
+func NewHumanGrant(p *Provider, id HumanResolver, refresh *RefreshIssuer) *HumanGrant {
+	return &HumanGrant{p: p, id: id, refresh: refresh}
 }
 
 // ServeToken handles POST /token for the password grant.
@@ -50,30 +51,29 @@ func (g *HumanGrant) ServeToken(w http.ResponseWriter, r *http.Request) {
 		oauthError(w, http.StatusUnauthorized, "invalid_grant", "login rejected")
 		return
 	}
-	scopes, err := g.id.EffectiveScopes(r.Context(), u.ID)
+	claims, err := accessClaims(r.Context(), g.id, u)
 	if err != nil {
 		oauthError(w, http.StatusUnauthorized, "invalid_grant", "login rejected")
 		return
 	}
-	products, err := g.id.EnabledProducts(r.Context(), u.OrgID)
-	if err != nil {
-		oauthError(w, http.StatusUnauthorized, "invalid_grant", "login rejected")
-		return
-	}
-	tok, err := g.p.SignToken(map[string]any{
-		"sub":      u.ID,
-		"kind":     string(store.KindHuman),
-		"org":      u.OrgID,
-		"scope":    strings.Join(scopes, " "),
-		"products": products,
-	})
+	tok, err := g.p.SignToken(claims)
 	if err != nil {
 		oauthError(w, http.StatusInternalServerError, "server_error", "token signing failed")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"access_token": tok,
 		"token_type":   "Bearer",
 		"expires_in":   int(g.p.TTL().Seconds()),
-	})
+	}
+	if g.refresh != nil {
+		// Refresh is best-effort: a failure still returns a usable access token,
+		// but log it — silent absence would surface only as clients re-logging in.
+		if rtok, err := g.refresh.Issue(r.Context(), u.ID); err != nil {
+			log.Printf("oidc: refresh.Issue for human %s: %v", u.ID, err)
+		} else {
+			resp["refresh_token"] = rtok
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
