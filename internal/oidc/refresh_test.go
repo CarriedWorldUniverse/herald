@@ -106,7 +106,10 @@ func TestRefreshGrant_EndToEnd(t *testing.T) {
 
 	post := func(form url.Values) map[string]any {
 		t.Helper()
-		resp, _ := http.Post(srv.URL+"/token", "application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
+		resp, err := http.Post(srv.URL+"/token", "application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
+		if err != nil {
+			t.Fatalf("POST /token: %v", err)
+		}
 		defer resp.Body.Close()
 		var out map[string]any
 		_ = json.NewDecoder(resp.Body).Decode(&out)

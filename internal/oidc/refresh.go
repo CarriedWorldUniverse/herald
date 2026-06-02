@@ -111,6 +111,13 @@ func (ri *RefreshIssuer) revoke(ctx context.Context, presented string) {
 	}
 }
 
+// revokeChain revokes a chain by id — for callers that already hold the
+// resolved row (e.g. the refresh grant revoking a blocked user's chain), so
+// the store stays behind the RefreshIssuer boundary.
+func (ri *RefreshIssuer) revokeChain(ctx context.Context, chainID string) error {
+	return ri.st.RevokeRefreshChain(ctx, chainID)
+}
+
 func splitRefresh(s string) (id, secret string, ok bool) {
 	i := strings.IndexByte(s, '.')
 	if i <= 0 || i == len(s)-1 {
@@ -175,7 +182,7 @@ func (g *RefreshGrant) ServeToken(w http.ResponseWriter, r *http.Request) {
 	// Enforce the block cascade at refresh time (a blocked agent/human/org can't
 	// renew). IsActive evaluates the agent + its responsible human + org.
 	if !g.id.IsActive(r.Context(), u.ID) {
-		_ = g.refresh.st.RevokeRefreshChain(r.Context(), rt.ChainID)
+		_ = g.refresh.revokeChain(r.Context(), rt.ChainID)
 		oauthError(w, http.StatusUnauthorized, "invalid_grant", "refresh token rejected")
 		return
 	}
