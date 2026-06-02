@@ -49,7 +49,7 @@ func liveHerald(t *testing.T) (issuer string, agentToken, agentID, humanID, orgI
 	srv := httptest.NewServer(nil)
 	t.Cleanup(srv.Close)
 	p, _ := herald.NewProvider(herald.Config{Issuer: srv.URL + "/", SigningKey: signKey})
-	p.SetTokenHandler(herald.NewAgentGrant(p, svc))
+	p.SetTokenHandler(herald.NewAgentGrant(p, svc, nil))
 	srv.Config.Handler = p.Handler()
 
 	// Agent mints a token via the real jwt-bearer endpoint.

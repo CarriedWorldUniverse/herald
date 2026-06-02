@@ -69,6 +69,7 @@ func main() {
 	provider.SetTokenHandler(oidc.NewGrantMux(
 		oidc.NewAgentGrant(provider, idsvc, refresh),
 		oidc.NewHumanGrant(provider, idsvc, refresh),
+		oidc.NewRefreshGrant(provider, idsvc, refresh),
 	))
 
 	gatewayBase := os.Getenv("HERALD_GATEWAY_URL")

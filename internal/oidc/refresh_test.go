@@ -3,8 +3,14 @@ package oidc
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 
+	"github.com/CarriedWorldUniverse/herald/internal/identity"
 	"github.com/CarriedWorldUniverse/herald/internal/store"
 )
 
@@ -70,5 +76,65 @@ func TestRefreshIssuer_RevokeAndGarbage(t *testing.T) {
 	ri.revoke(ctx, "garbage-no-dot") // must not panic
 	if _, err := ri.validate(ctx, "garbage-no-dot"); err == nil {
 		t.Fatal("malformed token must be rejected")
+	}
+}
+
+func TestRefreshGrant_EndToEnd(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	svc := identity.New(st)
+	org, _ := st.CreateOrg(ctx, "acme")
+	h, _ := svc.CreateHuman(ctx, org.ID, "alice")
+	if err := svc.SetHumanPassword(ctx, h.ID, "hunter2hunter2"); err != nil {
+		t.Fatalf("SetHumanPassword: %v", err)
+	}
+
+	_, signKey, _ := ed25519.GenerateKey(nil)
+	p, _ := NewProvider(Config{Issuer: "http://h/", SigningKey: signKey})
+	refresh := NewRefreshIssuer(p, st, 0)
+	p.SetTokenHandler(NewGrantMux(
+		NewAgentGrant(p, svc, refresh),
+		NewHumanGrant(p, svc, refresh),
+		NewRefreshGrant(p, svc, refresh),
+	))
+	srv := httptest.NewServer(p.Handler())
+	t.Cleanup(srv.Close)
+
+	post := func(form url.Values) map[string]any {
+		t.Helper()
+		resp, _ := http.Post(srv.URL+"/token", "application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
+		defer resp.Body.Close()
+		var out map[string]any
+		_ = json.NewDecoder(resp.Body).Decode(&out)
+		return out
+	}
+
+	// 1. password login -> access + refresh.
+	login := post(url.Values{"grant_type": {"password"}, "username": {h.ID}, "password": {"hunter2hunter2"}})
+	rtok, _ := login["refresh_token"].(string)
+	if rtok == "" {
+		t.Fatalf("login returned no refresh_token: %+v", login)
+	}
+
+	// 2. refresh -> new access + new refresh.
+	r1 := post(url.Values{"grant_type": {"refresh_token"}, "refresh_token": {rtok}})
+	if r1["access_token"] == nil || r1["refresh_token"] == nil {
+		t.Fatalf("refresh failed: %+v", r1)
+	}
+	newR, _ := r1["refresh_token"].(string)
+
+	// 3. the OLD refresh token is now rotated away -> rejected.
+	r2 := post(url.Values{"grant_type": {"refresh_token"}, "refresh_token": {rtok}})
+	if r2["error"] == nil {
+		t.Fatalf("reused old refresh token should be rejected: %+v", r2)
+	}
+	// 4. replay revoked the chain -> the once-valid successor is dead too.
+	r3 := post(url.Values{"grant_type": {"refresh_token"}, "refresh_token": {newR}})
+	if r3["error"] == nil {
+		t.Fatalf("successor after replay should be rejected: %+v", r3)
 	}
 }

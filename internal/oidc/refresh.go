@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -134,4 +135,69 @@ func randB64(n int) string {
 func sha256hex(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return fmt.Sprintf("%x", sum)
+}
+
+// RefreshGrant implements grant_type=refresh_token: validate the presented
+// refresh token, REBUILD the access-token claims from the user record (so
+// scope/product/block changes take effect), rotate the refresh token, and
+// return both. Rebuilding from the record means a refreshed token can never
+// carry more authority than the user currently holds.
+type RefreshGrant struct {
+	p       *Provider
+	id      IdentityResolver
+	refresh *RefreshIssuer
+}
+
+func NewRefreshGrant(p *Provider, id IdentityResolver, refresh *RefreshIssuer) *RefreshGrant {
+	return &RefreshGrant{p: p, id: id, refresh: refresh}
+}
+
+func (g *RefreshGrant) ServeToken(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		oauthError(w, http.StatusBadRequest, "invalid_request", "unparseable form")
+		return
+	}
+	presented := r.Form.Get("refresh_token")
+	if presented == "" {
+		oauthError(w, http.StatusBadRequest, "invalid_request", "missing refresh_token")
+		return
+	}
+	rt, err := g.refresh.validate(r.Context(), presented)
+	if err != nil {
+		oauthError(w, http.StatusUnauthorized, "invalid_grant", "refresh token rejected")
+		return
+	}
+	u, err := g.id.GetUser(r.Context(), rt.UserID)
+	if err != nil {
+		oauthError(w, http.StatusUnauthorized, "invalid_grant", "refresh token rejected")
+		return
+	}
+	// Enforce the block cascade at refresh time (a blocked agent/human/org can't
+	// renew). IsActive evaluates the agent + its responsible human + org.
+	if !g.id.IsActive(r.Context(), u.ID) {
+		_ = g.refresh.st.RevokeRefreshChain(r.Context(), rt.ChainID)
+		oauthError(w, http.StatusUnauthorized, "invalid_grant", "refresh token rejected")
+		return
+	}
+	claims, err := accessClaims(r.Context(), g.id, u)
+	if err != nil {
+		oauthError(w, http.StatusInternalServerError, "server_error", "claims failed")
+		return
+	}
+	access, err := g.p.SignToken(claims)
+	if err != nil {
+		oauthError(w, http.StatusInternalServerError, "server_error", "token signing failed")
+		return
+	}
+	newRefresh, err := g.refresh.rotate(r.Context(), rt)
+	if err != nil {
+		oauthError(w, http.StatusInternalServerError, "server_error", "refresh rotation failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"access_token":  access,
+		"token_type":    "Bearer",
+		"expires_in":    int(g.p.TTL().Seconds()),
+		"refresh_token": newRefresh,
+	})
 }
