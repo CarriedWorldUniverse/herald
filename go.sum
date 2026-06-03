@@ -1,7 +1,7 @@
 github.com/CarriedWorldUniverse/casket-go v0.1.0 h1:t+DvXs8vhaNcTfkSS/sqK47fBTNVRdHfF7DT/ur0jtY=
 github.com/CarriedWorldUniverse/casket-go v0.1.0/go.mod h1:v0y8kPW/WmusBw+Q3ZtRYhVwoK/WVVVXHWSc/oRVWBo=
-github.com/CarriedWorldUniverse/cwb-proto v0.0.0-20260602012124-c875c9576c65 h1:fE3mKUjX1PalqVrTX2zSFwUtgLhOs/5yG3+ayb71Ws8=
-github.com/CarriedWorldUniverse/cwb-proto v0.0.0-20260602012124-c875c9576c65/go.mod h1:SBXfS7WeuwK80SZrysL1YC0oDrNlNYoXqgWKkeK80wE=
+github.com/CarriedWorldUniverse/cwb-proto v0.0.0-20260603001141-c76ceb4abace h1:nPkvSW8B9zO/mNvWg3QeSwSzEQl3HPAE6Ppk6xE/lWQ=
+github.com/CarriedWorldUniverse/cwb-proto v0.0.0-20260603001141-c76ceb4abace/go.mod h1:SBXfS7WeuwK80SZrysL1YC0oDrNlNYoXqgWKkeK80wE=
 github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=
 github.com/cespare/xxhash/v2 v2.3.0/go.mod h1:VGX0DQ3Q6kWi7AoAeZDth3/j3BFtOZR5XLFGgcrjCOs=
 github.com/dustin/go-humanize v1.0.1 h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkpeCY=
