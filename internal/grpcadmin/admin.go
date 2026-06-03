@@ -211,6 +211,38 @@ func (a *adminServer) IssueHumanToken(ctx context.Context, r *heraldv1.IssueHuma
 	return &heraldv1.IssueHumanTokenResponse{AccessToken: tok, TokenType: "Bearer"}, nil
 }
 
+// Me returns the caller's own authoritative identity record. Any authenticated
+// principal may call it for themselves — no admin scope (callerFromCtx only).
+func (a *adminServer) Me(ctx context.Context, _ *heraldv1.MeRequest) (*heraldv1.MeResponse, error) {
+	c, ok := callerFromCtx(ctx)
+	if !ok {
+		return nil, status.Error(codes.Unauthenticated, "missing identity")
+	}
+	user, err := a.s.id.GetUser(ctx, c.Subject)
+	if err != nil {
+		return nil, status.Error(codes.NotFound, "identity not found")
+	}
+	org, err := a.s.id.GetOrg(ctx, user.OrgID)
+	if err != nil {
+		return nil, status.Error(codes.Internal, "org lookup failed")
+	}
+	scopes, err := a.s.id.EffectiveScopes(ctx, user.ID)
+	if err != nil {
+		return nil, status.Error(codes.Internal, "scope lookup failed")
+	}
+	return &heraldv1.MeResponse{User: &heraldv1.UserInfo{
+		Id:               user.ID,
+		Kind:             string(user.Kind),
+		DisplayName:      user.DisplayName,
+		Org:              user.OrgID,
+		OrgName:          org.Name,
+		Status:           string(user.Status),
+		Scopes:           scopes,
+		ResponsibleHuman: user.ResponsibleHuman,
+		Fingerprint:      user.CasketFingerprint,
+	}}, nil
+}
+
 // grantAll grants each scope to userID on behalf of grantedBy (an FK-valid user
 // id — the verified caller).
 func (a *adminServer) grantAll(ctx context.Context, userID string, scopes []string, grantedBy string) error {
