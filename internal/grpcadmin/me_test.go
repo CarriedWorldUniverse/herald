@@ -68,7 +68,7 @@ func TestMe(t *testing.T) {
 		t.Fatalf("Me(agent): %v", err)
 	}
 	a := aresp.User
-	if a.Id != agent.ID || a.Kind != "agent" || a.Org != org.ID {
+	if a.Id != agent.ID || a.Kind != "agent" || a.Org != org.ID || a.OrgName != "acme" || a.Status != "active" {
 		t.Fatalf("agent UserInfo: %+v", a)
 	}
 	if a.ResponsibleHuman != human.ID {
