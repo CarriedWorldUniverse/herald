@@ -15,7 +15,9 @@ Most identity products model **humans**, and bolt machines on as second-class "s
 
 ## Status
 
-**MVP spec'd, not yet built.** See [`docs/2026-05-30-herald-mvp-spec.md`](docs/2026-05-30-herald-mvp-spec.md). Tracked in NEX-376 (epic) + NEX-377–381.
+**MVP built.** herald is a single Go binary (`cmd/herald`) serving the OIDC token/JWKS endpoints, human password-grant login, casket-keyed agent auth, rotating refresh tokens, and a gRPC AdminService for org/human/agent administration. Admin authority is **identity-derived** — derived from a herald JWT carrying `herald:platform-admin` / `herald:org-admin` scopes, not a static admin token. k3s deployment manifests live under [`deploy/k3s`](deploy/k3s); see the [smoke-test runbook](docs/dmon-smoketest.md).
+
+Design spec: [`docs/2026-05-30-herald-mvp-spec.md`](docs/2026-05-30-herald-mvp-spec.md). Tracked in NEX-376 (epic) + NEX-377–381.
 
 ## Stack position
 
