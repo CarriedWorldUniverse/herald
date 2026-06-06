@@ -6,6 +6,7 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
@@ -90,6 +91,9 @@ func (s *SQLite) CreateUser(ctx context.Context, u User) (User, error) {
 		u.ID, u.OrgID, string(u.Kind), u.DisplayName, string(u.Status),
 		nullStr(u.LoginSecret), nullBytes(u.CasketPubkey), nullStr(u.CasketFingerprint), nullStr(u.ResponsibleHuman))
 	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed: user.casket_fingerprint") {
+			return User{}, ErrDuplicateFingerprint
+		}
 		return User{}, fmt.Errorf("CreateUser: %w", err)
 	}
 	return s.GetUser(ctx, u.ID)
@@ -101,6 +105,33 @@ func (s *SQLite) GetUser(ctx context.Context, id string) (User, error) {
 
 func (s *SQLite) GetUserByCasketFingerprint(ctx context.Context, fp string) (User, error) {
 	return s.scanUser(s.db.QueryRowContext(ctx, userSelect+` WHERE casket_fingerprint = ?`, fp))
+}
+
+// GetUserByDisplayName resolves a human by display name (login-by-email). It
+// matches kind='human' only and requires EXACTLY one match — zero or many both
+// yield ErrNotFound, so an ambiguous display name can never resolve to a wrong
+// user.
+func (s *SQLite) GetUserByDisplayName(ctx context.Context, displayName string) (User, error) {
+	rows, err := s.db.QueryContext(ctx, userSelect+` WHERE display_name = ? AND kind = 'human' LIMIT 2`, displayName)
+	if err != nil {
+		return User{}, fmt.Errorf("GetUserByDisplayName: %w", err)
+	}
+	defer rows.Close()
+	var found []User
+	for rows.Next() {
+		u, err := scanUserRow(rows)
+		if err != nil {
+			return User{}, err
+		}
+		found = append(found, u)
+	}
+	if err := rows.Err(); err != nil {
+		return User{}, err
+	}
+	if len(found) != 1 {
+		return User{}, ErrNotFound // 0 (none) or >1 (ambiguous) both fail closed
+	}
+	return found[0], nil
 }
 
 func (s *SQLite) ListAgentsByResponsibleHuman(ctx context.Context, humanID string) ([]User, error) {
@@ -124,6 +155,15 @@ func (s *SQLite) SetUserStatus(ctx context.Context, id string, st Status) error 
 	res, err := s.db.ExecContext(ctx, `UPDATE user SET status = ? WHERE id = ?`, string(st), id)
 	if err != nil {
 		return fmt.Errorf("SetUserStatus: %w", err)
+	}
+	return mustAffect(res)
+}
+
+// SetLoginSecret stores a human's password hash (bcrypt) in login_secret.
+func (s *SQLite) SetLoginSecret(ctx context.Context, id, hash string) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE user SET login_secret = ? WHERE id = ?`, hash, id)
+	if err != nil {
+		return fmt.Errorf("SetLoginSecret: %w", err)
 	}
 	return mustAffect(res)
 }
@@ -173,6 +213,46 @@ func (s *SQLite) ListScopes(ctx context.Context, userID string) ([]string, error
 		out = append(out, sc)
 	}
 	return out, rows.Err()
+}
+
+func (s *SQLite) CreateRefreshToken(ctx context.Context, rt RefreshToken) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO refresh_token (id, chain_id, token_hash, user_id, expires_at)
+		 VALUES (?, ?, ?, ?, ?)`,
+		rt.ID, rt.ChainID, rt.TokenHash, rt.UserID, rt.ExpiresAt)
+	if err != nil {
+		return fmt.Errorf("CreateRefreshToken: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLite) GetRefreshToken(ctx context.Context, id string) (RefreshToken, error) {
+	var rt RefreshToken
+	var revoked sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, chain_id, token_hash, user_id, issued_at, expires_at, revoked_at
+		   FROM refresh_token WHERE id = ?`, id).
+		Scan(&rt.ID, &rt.ChainID, &rt.TokenHash, &rt.UserID, &rt.IssuedAt, &rt.ExpiresAt, &revoked)
+	if errors.Is(err, sql.ErrNoRows) {
+		return RefreshToken{}, ErrNotFound
+	}
+	if err != nil {
+		return RefreshToken{}, fmt.Errorf("GetRefreshToken: %w", err)
+	}
+	rt.RevokedAt = revoked.String
+	return rt, nil
+}
+
+func (s *SQLite) RevokeRefreshChain(ctx context.Context, chainID string) error {
+	// RFC3339 UTC to match expires_at's format (so RevokedAt is parseable by
+	// any consumer, not just emptiness-checked).
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE refresh_token SET revoked_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+		   WHERE chain_id = ? AND revoked_at IS NULL`, chainID)
+	if err != nil {
+		return fmt.Errorf("RevokeRefreshChain: %w", err)
+	}
+	return nil
 }
 
 // --- scan helpers ---
@@ -231,4 +311,115 @@ func mustAffect(res sql.Result) error {
 		return ErrNotFound
 	}
 	return nil
+}
+
+func (s *SQLite) DeleteOrg(ctx context.Context, id string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("DeleteOrg: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Defer FK enforcement to COMMIT so intra-org self-references
+	// (user.responsible_human, scope_grant.granted_by) don't fail mid-delete.
+	// No-op when foreign_keys is off (e.g. :memory: tests).
+	if _, err := tx.ExecContext(ctx, `PRAGMA defer_foreign_keys = ON`); err != nil {
+		return fmt.Errorf("DeleteOrg: defer fk: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM scope_grant WHERE user_id IN (SELECT id FROM user WHERE org_id=?)
+		    OR granted_by IN (SELECT id FROM user WHERE org_id=?)`, id, id); err != nil {
+		return fmt.Errorf("DeleteOrg: scope_grant: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM federated_binding WHERE org_id=?`, id); err != nil {
+		return fmt.Errorf("DeleteOrg: federated_binding: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM issuer WHERE org_id=?`, id); err != nil {
+		return fmt.Errorf("DeleteOrg: issuer: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM org_product WHERE org_id=?`, id); err != nil {
+		return fmt.Errorf("DeleteOrg: org_product: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM refresh_token WHERE user_id IN (SELECT id FROM user WHERE org_id=?)`, id); err != nil {
+		return fmt.Errorf("DeleteOrg: refresh_token: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM user WHERE org_id=?`, id); err != nil {
+		return fmt.Errorf("DeleteOrg: user: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM org WHERE id=?`, id); err != nil {
+		return fmt.Errorf("DeleteOrg: org: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("DeleteOrg: commit: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLite) ListOrgs(ctx context.Context) ([]Org, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, status, created_at FROM org ORDER BY created_at`)
+	if err != nil {
+		return nil, fmt.Errorf("ListOrgs: %w", err)
+	}
+	defer rows.Close()
+	var out []Org
+	for rows.Next() {
+		var o Org
+		var status string
+		if err := rows.Scan(&o.ID, &o.Name, &status, &o.CreatedAt); err != nil {
+			return nil, fmt.Errorf("ListOrgs scan: %w", err)
+		}
+		o.Status = Status(status)
+		out = append(out, o)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLite) SetProductEnabled(ctx context.Context, orgID, product string, enabled bool) error {
+	e := 0
+	if enabled {
+		e = 1
+	}
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO org_product (org_id, product, enabled, updated_at)
+		 VALUES (?, ?, ?, datetime('now'))
+		 ON CONFLICT(org_id, product) DO UPDATE SET enabled=excluded.enabled, updated_at=datetime('now')`,
+		orgID, product, e)
+	if err != nil {
+		return fmt.Errorf("SetProductEnabled: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLite) IsProductEnabled(ctx context.Context, orgID, product string) (bool, error) {
+	var enabled int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT enabled FROM org_product WHERE org_id = ? AND product = ?`, orgID, product).
+		Scan(&enabled)
+	if errors.Is(err, sql.ErrNoRows) {
+		return true, nil // deny-list: no row = enabled
+	}
+	if err != nil {
+		return false, fmt.Errorf("IsProductEnabled: %w", err)
+	}
+	return enabled == 1, nil
+}
+
+func (s *SQLite) ListProductOverrides(ctx context.Context, orgID string) (map[string]bool, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT product, enabled FROM org_product WHERE org_id = ?`, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("ListProductOverrides: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var p string
+		var e int
+		if err := rows.Scan(&p, &e); err != nil {
+			return nil, fmt.Errorf("ListProductOverrides scan: %w", err)
+		}
+		out[p] = e == 1
+	}
+	return out, rows.Err()
 }

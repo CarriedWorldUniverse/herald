@@ -1,0 +1,24 @@
+# herald's gRPC server TLS identity (Phase 4). server auth + dnsNames so
+# interchange (and cairn, for by-fingerprint) can dial herald.cwb.svc:8098 over
+# mTLS and verify the SAN. herald's OIDC HTTP (:8099) stays plain (gateway
+# passthrough); only the gRPC admin/agent API is mTLS. Uses the shared cwb-ca
+# Issuer (provisioned with commonplace's certs).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: herald-tls
+  namespace: cwb
+spec:
+  secretName: herald-tls
+  dnsNames:
+    - herald.cwb.svc
+    - herald.cwb.svc.cluster.local
+    - herald
+  usages:
+    - server auth
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: cwb-ca
+    kind: Issuer

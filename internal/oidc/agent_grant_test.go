@@ -37,7 +37,7 @@ func testStack(t *testing.T) (*herald.Provider, *identity.Service, *httptest.Ser
 	if err != nil {
 		t.Fatalf("NewProvider: %v", err)
 	}
-	p.SetTokenHandler(herald.NewAgentGrant(p, svc))
+	p.SetTokenHandler(herald.NewAgentGrant(p, svc, nil))
 	srv := httptest.NewServer(p.Handler())
 	t.Cleanup(srv.Close)
 	return p, svc, srv
@@ -205,6 +205,56 @@ func TestAgentGrant_ClientCannotForgeResponsibleHuman(t *testing.T) {
 	act, _ := claims["act"].(map[string]any)
 	if act["sub"] != realHuman.ID {
 		t.Fatalf("herald must stamp act.sub from the record (%v), not client input; got %v", realHuman.ID, act["sub"])
+	}
+}
+
+func toStringSlice(v any) []string {
+	arr, _ := v.([]any)
+	out := make([]string, 0, len(arr))
+	for _, e := range arr {
+		if s, ok := e.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func joinStrs(ss []string) string {
+	out := ""
+	for i, s := range ss {
+		if i > 0 {
+			out += ","
+		}
+		out += s
+	}
+	return out
+}
+
+func TestAgentGrant_ProductsClaim(t *testing.T) {
+	p, svc, srv := testStack(t)
+	ctx := context.Background()
+	org, _ := svc.CreateOrg(ctx, "acme")
+	h, _ := svc.CreateHuman(ctx, org.ID, "jacinta")
+	priv, pub, _ := casket.DeriveAgentKey([]byte(grantTestSeed), "anvil")
+	a, _ := svc.CreateAgent(ctx, org.ID, "anvil", h.ID, pub)
+
+	// Disable ledger so the products claim should be [cairn, commonplace].
+	if err := svc.DisableProduct(ctx, org.ID, identity.ProductLedger); err != nil {
+		t.Fatalf("DisableProduct: %v", err)
+	}
+
+	assertion := signAssertion(t, a.ID, p.TokenURL(), priv, time.Now().Add(2*time.Minute))
+	resp, body := postAssertion(t, srv.URL+"/token", assertion)
+	if resp.StatusCode != 200 {
+		t.Fatalf("token endpoint status=%d body=%+v", resp.StatusCode, body)
+	}
+	tok, _ := body["access_token"].(string)
+	claims, err := p.VerifyToken(tok)
+	if err != nil {
+		t.Fatalf("verify issued token: %v", err)
+	}
+	if got := joinStrs(toStringSlice(claims["products"])); got != "cairn,commonplace" {
+		t.Fatalf("products = %q, want \"cairn,commonplace\"", got)
 	}
 }
 
