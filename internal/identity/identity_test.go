@@ -2,6 +2,7 @@ package identity_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	casket "github.com/CarriedWorldUniverse/casket-go"
@@ -154,5 +155,100 @@ func TestEffectiveScopes(t *testing.T) {
 	}
 	if len(scopes) != 2 {
 		t.Fatalf("want 2 scopes, got %v", scopes)
+	}
+}
+
+func TestCreateAgent_DuplicatePubkeyRejected(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer s.Close()
+	svc := identity.New(s)
+	org, _ := s.CreateOrg(ctx, "acme")
+	human, _ := svc.CreateHuman(ctx, org.ID, "alice")
+
+	_, pub, _ := casket.DeriveAgentKey([]byte("owner-seed-32-bytes-padded-xxxxx"), "builder")
+	if _, err := svc.CreateAgent(ctx, org.ID, "builder", human.ID, pub); err != nil {
+		t.Fatalf("first agent: %v", err)
+	}
+	if _, err := svc.CreateAgent(ctx, org.ID, "builder2", human.ID, pub); !errors.Is(err, store.ErrDuplicateFingerprint) {
+		t.Fatalf("dup pubkey err = %v, want store.ErrDuplicateFingerprint", err)
+	}
+	_, pub2, _ := casket.DeriveAgentKey([]byte("owner-seed-32-bytes-padded-xxxxx"), "reader")
+	if _, err := svc.CreateAgent(ctx, org.ID, "reader", human.ID, pub2); err != nil {
+		t.Fatalf("distinct pubkey: %v", err)
+	}
+}
+
+func TestHumanPassword(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer s.Close()
+	svc := identity.New(s)
+
+	org, err := s.CreateOrg(ctx, "acme")
+	if err != nil {
+		t.Fatalf("CreateOrg: %v", err)
+	}
+	h, err := svc.CreateHuman(ctx, org.ID, "alice")
+	if err != nil {
+		t.Fatalf("CreateHuman: %v", err)
+	}
+
+	if err := svc.SetHumanPassword(ctx, h.ID, "correct-horse-battery"); err != nil {
+		t.Fatalf("SetHumanPassword: %v", err)
+	}
+	if _, err := svc.VerifyHumanPassword(ctx, h.ID, "correct-horse-battery"); err != nil {
+		t.Fatalf("verify correct password: %v", err)
+	}
+	if _, err := svc.VerifyHumanPassword(ctx, h.ID, "wrong"); !errors.Is(err, identity.ErrInvalidCredentials) {
+		t.Fatalf("verify wrong password err = %v, want ErrInvalidCredentials", err)
+	}
+	if _, err := svc.VerifyHumanPassword(ctx, "no-such-user", "x"); !errors.Is(err, identity.ErrInvalidCredentials) {
+		t.Fatalf("verify unknown user err = %v, want ErrInvalidCredentials", err)
+	}
+	h2, _ := svc.CreateHuman(ctx, org.ID, "bob")
+	if _, err := svc.VerifyHumanPassword(ctx, h2.ID, "anything"); !errors.Is(err, identity.ErrInvalidCredentials) {
+		t.Fatalf("verify no-password err = %v, want ErrInvalidCredentials", err)
+	}
+}
+
+// TestVerifyHumanPasswordByEmail covers Phase-5a login-by-email: a human can
+// authenticate by display name (email), not only by user id, and an ambiguous
+// display name fails closed.
+func TestVerifyHumanPasswordByEmail(t *testing.T) {
+	svc := newTestIdentity(t)
+	ctx := context.Background()
+	org, _ := svc.CreateOrg(ctx, "acme")
+	h, _ := svc.CreateHuman(ctx, org.ID, "cwadmin@carriedworld.com")
+	if err := svc.SetHumanPassword(ctx, h.ID, "supersecret1"); err != nil {
+		t.Fatalf("SetHumanPassword: %v", err)
+	}
+
+	// by id (back-compat)
+	if _, err := svc.VerifyHumanPassword(ctx, h.ID, "supersecret1"); err != nil {
+		t.Errorf("login by id: %v", err)
+	}
+	// by email / display name
+	if got, err := svc.VerifyHumanPassword(ctx, "cwadmin@carriedworld.com", "supersecret1"); err != nil || got.ID != h.ID {
+		t.Errorf("login by email: got %s err %v, want %s", got.ID, err, h.ID)
+	}
+	// wrong password
+	if _, err := svc.VerifyHumanPassword(ctx, "cwadmin@carriedworld.com", "nope"); !errors.Is(err, identity.ErrInvalidCredentials) {
+		t.Errorf("wrong password: want ErrInvalidCredentials, got %v", err)
+	}
+	// ambiguous display name fails closed (two humans, same name, different orgs)
+	org2, _ := svc.CreateOrg(ctx, "beta")
+	h2, _ := svc.CreateHuman(ctx, org2.ID, "dup@x.com")
+	_ = svc.SetHumanPassword(ctx, h2.ID, "supersecret1")
+	h3, _ := svc.CreateHuman(ctx, org.ID, "dup@x.com")
+	_ = svc.SetHumanPassword(ctx, h3.ID, "supersecret1")
+	if _, err := svc.VerifyHumanPassword(ctx, "dup@x.com", "supersecret1"); !errors.Is(err, identity.ErrInvalidCredentials) {
+		t.Errorf("ambiguous email must fail closed, got %v", err)
 	}
 }

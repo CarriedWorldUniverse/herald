@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,6 +20,8 @@ import (
 	herald "github.com/CarriedWorldUniverse/herald/internal/oidc"
 	"github.com/CarriedWorldUniverse/herald/internal/store"
 )
+
+var liveHeraldSeq atomic.Int64
 
 // liveHerald spins a real herald (provider + identity + agent grant) and
 // returns the server + a minted agent token, so heraldauth verifies against a
@@ -33,15 +37,19 @@ func liveHerald(t *testing.T) (issuer string, agentToken, agentID, humanID, orgI
 	ctx := context.Background()
 	org, _ := svc.CreateOrg(ctx, "acme")
 	h, _ := svc.CreateHuman(ctx, org.ID, "jacinta")
-	priv, pub, _ := casket.DeriveAgentKey([]byte("owner-seed-32-bytes-padded-xxxxx"), "anvil")
-	a, _ := svc.CreateAgent(ctx, org.ID, "anvil", h.ID, pub)
+	slug := fmt.Sprintf("anvil-%d", liveHeraldSeq.Add(1))
+	priv, pub, _ := casket.DeriveAgentKey([]byte("owner-seed-32-bytes-padded-xxxxx"), slug)
+	a, err := svc.CreateAgent(ctx, org.ID, slug, h.ID, pub)
+	if err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
 	_ = svc.GrantScope(ctx, a.ID, "repo:write", h.ID)
 
 	_, signKey, _ := ed25519.GenerateKey(nil)
 	srv := httptest.NewServer(nil)
 	t.Cleanup(srv.Close)
 	p, _ := herald.NewProvider(herald.Config{Issuer: srv.URL + "/", SigningKey: signKey})
-	p.SetTokenHandler(herald.NewAgentGrant(p, svc))
+	p.SetTokenHandler(herald.NewAgentGrant(p, svc, nil))
 	srv.Config.Handler = p.Handler()
 
 	// Agent mints a token via the real jwt-bearer endpoint.
@@ -144,6 +152,28 @@ func TestVerifier_JWKSURLOverride_BypassesDiscovery(t *testing.T) {
 	}
 	if _, err := v.Verify(ctx, tok); err != nil {
 		t.Fatalf("Verify with JWKSURL override: %v", err)
+	}
+}
+
+func TestVerifier_ParsesProductsClaim(t *testing.T) {
+	issuer, tok, _, _, _ := liveHerald(t)
+	v, err := heraldauth.New(context.Background(), heraldauth.Config{Issuer: issuer})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	id, err := v.Verify(context.Background(), tok)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	want := map[string]bool{"cairn": true, "ledger": true, "commonplace": true}
+	got := map[string]bool{}
+	for _, p := range id.Products {
+		got[p] = true
+	}
+	for p := range want {
+		if !got[p] {
+			t.Fatalf("Products = %v, missing %s", id.Products, p)
+		}
 	}
 }
 

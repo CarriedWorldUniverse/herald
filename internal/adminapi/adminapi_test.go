@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,7 +22,11 @@ import (
 	"github.com/CarriedWorldUniverse/herald/internal/store"
 )
 
-const adminToken = "test-admin-token"
+// These tests cover adminapi's token-authenticated surface: agent
+// self-provision, human validation, and the by-fingerprint service lookup.
+// The org/human/product ADMIN surface moved to the gRPC AdminService and is
+// tested in internal/grpcadmin; here we provision fixtures DIRECTLY via the
+// identity service (the path the gRPC admin layer drives in production).
 
 func newStack(t *testing.T) (*identity.Service, *herald.Provider, *httptest.Server) {
 	t.Helper()
@@ -36,12 +41,12 @@ func newStack(t *testing.T) (*identity.Service, *herald.Provider, *httptest.Serv
 	srv := httptest.NewServer(nil)
 	t.Cleanup(srv.Close)
 	p, _ := herald.NewProvider(herald.Config{Issuer: srv.URL + "/", SigningKey: signKey})
-	grant := herald.NewAgentGrant(p, svc)
+	grant := herald.NewAgentGrant(p, svc, nil)
 	p.SetTokenHandler(grant)
 
-	api := adminapi.New(svc, p, adminToken)
+	api := adminapi.New(svc, p)
 
-	// Combined mux: OIDC endpoints + admin/provision API.
+	// Combined mux: OIDC endpoints + the token-authed provision API.
 	mux := http.NewServeMux()
 	mux.Handle("/.well-known/", p.Handler())
 	mux.Handle("/jwks", p.Handler())
@@ -72,6 +77,68 @@ func doJSON(t *testing.T, method, url, bearer string, body any) (*http.Response,
 	return resp, out
 }
 
+// --- fixtures provisioned directly via the identity service ---
+
+func mkOrg(t *testing.T, svc *identity.Service, name string) string {
+	t.Helper()
+	org, err := svc.CreateOrg(context.Background(), name)
+	if err != nil {
+		t.Fatalf("CreateOrg %q: %v", name, err)
+	}
+	return org.ID
+}
+
+func mkHuman(t *testing.T, svc *identity.Service, orgID, name string, scopes ...string) string {
+	t.Helper()
+	h, err := svc.CreateHuman(context.Background(), orgID, name)
+	if err != nil {
+		t.Fatalf("CreateHuman %q: %v", name, err)
+	}
+	for _, sc := range scopes {
+		if err := svc.GrantScope(context.Background(), h.ID, sc, h.ID); err != nil {
+			t.Fatalf("GrantScope %q to %q: %v", sc, name, err)
+		}
+	}
+	return h.ID
+}
+
+// mkAgent creates an ACTIVE agent under humanID with the given scopes (the
+// bootstrap path the gRPC admin layer owns) and returns (id, fingerprint).
+func mkAgent(t *testing.T, svc *identity.Service, orgID, humanID, name string, pub ed25519.PublicKey, scopes ...string) (string, string) {
+	t.Helper()
+	a, err := svc.CreateAgent(context.Background(), orgID, name, humanID, pub)
+	if err != nil {
+		t.Fatalf("CreateAgent %q: %v", name, err)
+	}
+	for _, sc := range scopes {
+		if err := svc.GrantScope(context.Background(), a.ID, sc, humanID); err != nil {
+			t.Fatalf("GrantScope %q to %q: %v", sc, name, err)
+		}
+	}
+	return a.ID, a.CasketFingerprint
+}
+
+// mintHumanToken signs a human herald token directly (the gRPC IssueHumanToken
+// equivalent), so the kept validate flow has a human caller.
+func mintHumanToken(t *testing.T, svc *identity.Service, prov *herald.Provider, humanID string) string {
+	t.Helper()
+	h, err := svc.GetUser(context.Background(), humanID)
+	if err != nil {
+		t.Fatalf("GetUser %q: %v", humanID, err)
+	}
+	scopes, _ := svc.EffectiveScopes(context.Background(), humanID)
+	tok, err := prov.SignToken(map[string]any{
+		"sub":   humanID,
+		"kind":  string(store.KindHuman),
+		"org":   h.OrgID,
+		"scope": strings.Join(scopes, " "),
+	})
+	if err != nil {
+		t.Fatalf("SignToken human %q: %v", humanID, err)
+	}
+	return tok
+}
+
 // mintAgentToken has an agent sign a casket assertion and exchange it at /token.
 func mintAgentToken(t *testing.T, srvURL, agentID string, priv ed25519.PrivateKey) string {
 	t.Helper()
@@ -93,20 +160,6 @@ func mintAgentToken(t *testing.T, srvURL, agentID string, priv ed25519.PrivateKe
 	tok, _ := body["access_token"].(string)
 	if tok == "" {
 		t.Fatalf("mintAgentToken failed: %+v", body)
-	}
-	return tok
-}
-
-// issueHumanToken uses the admin MVP login stand-in to mint a human token.
-func issueHumanToken(t *testing.T, srvURL, humanID string) string {
-	t.Helper()
-	resp, body := adminPost(t, srvURL+"/api/humans/"+humanID+"/token", nil)
-	if resp.StatusCode != 200 {
-		t.Fatalf("issue human token: %d %+v", resp.StatusCode, body)
-	}
-	tok, _ := body["access_token"].(string)
-	if tok == "" {
-		t.Fatalf("no human token: %+v", body)
 	}
 	return tok
 }
@@ -134,50 +187,23 @@ func mintAgentTokenExpectFail(t *testing.T, srvURL, agentID string, priv ed25519
 	return resp.StatusCode == 200
 }
 
-// TestGoldenPath exercises the operator's stated MVP loop:
-// create org -> create human -> bootstrap agent -> that agent self-provisions
-// a new agent under the same human -> the new agent OAuths a JWT.
+// TestGoldenPath exercises the operator's stated MVP loop: a bootstrap agent
+// (provisioned by the admin layer) self-provisions a NEW agent under the same
+// human; the new agent is PENDING until the human validates it, after which it
+// can OAuth a JWT.
 func TestGoldenPath(t *testing.T) {
-	svc, _, srv := newStack(t)
+	svc, prov, srv := newStack(t)
 	ctx := context.Background()
 
-	// admin endpoints require the admin token.
-	resp, _ := doJSON(t, "POST", srv.URL+"/api/orgs", "", map[string]any{"name": "acme"})
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("org create without admin token should be 401, got %d", resp.StatusCode)
-	}
+	orgID := mkOrg(t, svc, "acme")
+	humanID := mkHuman(t, svc, orgID, "jacinta")
 
-	// 1. admin bootstrap: org.
-	resp, org := adminPost(t, srv.URL+"/api/orgs", map[string]any{"name": "acme"})
-	if resp.StatusCode != 200 {
-		t.Fatalf("create org: %d %+v", resp.StatusCode, org)
-	}
-	orgID, _ := org["id"].(string)
-
-	// 2. admin bootstrap: human.
-	resp, human := adminPost(t, srv.URL+"/api/orgs/"+orgID+"/humans", map[string]any{"display_name": "jacinta"})
-	if resp.StatusCode != 200 {
-		t.Fatalf("create human: %d %+v", resp.StatusCode, human)
-	}
-	humanID, _ := human["id"].(string)
-
-	// 3. admin bootstrap: the bootstrap agent (with agent:create scope) under the human.
+	// Bootstrap agent (agent:create scope) under the human.
 	bsPriv, bsPub, _ := casket.DeriveAgentKey([]byte("owner-seed-32-bytes-padded-xxxxx"), "bootstrap")
-	resp, bsAgent := adminPost(t, srv.URL+"/api/orgs/"+orgID+"/agents", map[string]any{
-		"display_name":      "bootstrap",
-		"responsible_human": humanID,
-		"casket_pubkey":     base64.StdEncoding.EncodeToString(bsPub),
-		"scopes":            []string{"agent:create", "repo:read"},
-	})
-	if resp.StatusCode != 200 {
-		t.Fatalf("create bootstrap agent: %d %+v", resp.StatusCode, bsAgent)
-	}
-	bsID, _ := bsAgent["id"].(string)
-
-	// 4. bootstrap agent mints its token.
+	bsID, _ := mkAgent(t, svc, orgID, humanID, "bootstrap", bsPub, "agent:create", "repo:read")
 	bsTok := mintAgentToken(t, srv.URL, bsID, bsPriv)
 
-	// 5. THE SELF-PROVISION: bootstrap agent creates a NEW agent via the tool.
+	// THE SELF-PROVISION: bootstrap agent creates a NEW agent via the tool.
 	_, newPub, _ := casket.DeriveAgentKey([]byte("owner-seed-32-bytes-padded-xxxxx"), "anvil")
 	resp, newAgent := doJSON(t, "POST", srv.URL+"/api/agents", bsTok, map[string]any{
 		"display_name":  "anvil",
@@ -204,8 +230,8 @@ func TestGoldenPath(t *testing.T) {
 		t.Fatalf("new agent org = %q, want %q", got.OrgID, orgID)
 	}
 
-	// 6. HUMAN-IN-THE-LOOP: the self-provisioned agent is PENDING and cannot
-	//    mint a token until a human validates it.
+	// HUMAN-IN-THE-LOOP: the self-provisioned agent is PENDING and cannot mint a
+	// token until a human validates it.
 	if got.Status != store.StatusPending {
 		t.Fatalf("self-provisioned agent should be pending, got %q", got.Status)
 	}
@@ -214,8 +240,8 @@ func TestGoldenPath(t *testing.T) {
 		t.Fatal("pending agent must NOT be able to mint a token")
 	}
 
-	// Human gets a token (MVP login stand-in) and validates the agent.
-	humanTok := issueHumanToken(t, srv.URL, humanID)
+	// Human gets a token and validates the agent.
+	humanTok := mintHumanToken(t, svc, prov, humanID)
 	resp, vbody := doJSON(t, "POST", srv.URL+"/api/agents/"+newID+"/validate", humanTok, nil)
 	if resp.StatusCode != 200 {
 		t.Fatalf("validate: %d %+v", resp.StatusCode, vbody)
@@ -229,21 +255,18 @@ func TestGoldenPath(t *testing.T) {
 }
 
 func TestValidate_OnlyResponsibleHuman(t *testing.T) {
-	svc, _, srv := newStack(t)
+	svc, prov, srv := newStack(t)
 	ctx := context.Background()
-	_, org := adminPost(t, srv.URL+"/api/orgs", map[string]any{"name": "acme"})
-	orgID, _ := org["id"].(string)
-	_, h1 := adminPost(t, srv.URL+"/api/orgs/"+orgID+"/humans", map[string]any{"display_name": "jacinta"})
-	h1ID, _ := h1["id"].(string)
-	_, h2 := adminPost(t, srv.URL+"/api/orgs/"+orgID+"/humans", map[string]any{"display_name": "other"})
-	h2ID, _ := h2["id"].(string)
+	orgID := mkOrg(t, svc, "acme")
+	h1ID := mkHuman(t, svc, orgID, "jacinta")
+	h2ID := mkHuman(t, svc, orgID, "other")
 
 	// Pending agent under h1.
 	_, pub, _ := casket.DeriveAgentKey([]byte("owner-seed-32-bytes-padded-xxxxx"), "pend")
 	ag, _ := svc.CreateAgentPending(ctx, orgID, "pend", h1ID, pub)
 
 	// h2 (not the responsible human) must NOT be able to validate.
-	h2Tok := issueHumanToken(t, srv.URL, h2ID)
+	h2Tok := mintHumanToken(t, svc, prov, h2ID)
 	resp, _ := doJSON(t, "POST", srv.URL+"/api/agents/"+ag.ID+"/validate", h2Tok, nil)
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("non-responsible human validate should be 403, got %d", resp.StatusCode)
@@ -251,22 +274,14 @@ func TestValidate_OnlyResponsibleHuman(t *testing.T) {
 }
 
 func TestSelfProvision_RequiresAgentCreateScope(t *testing.T) {
-	_, _, srv := newStack(t)
+	svc, _, srv := newStack(t)
 
-	_, org := adminPost(t, srv.URL+"/api/orgs", map[string]any{"name": "acme"})
-	orgID, _ := org["id"].(string)
-	_, human := adminPost(t, srv.URL+"/api/orgs/"+orgID+"/humans", map[string]any{"display_name": "jacinta"})
-	humanID, _ := human["id"].(string)
+	orgID := mkOrg(t, svc, "acme")
+	humanID := mkHuman(t, svc, orgID, "jacinta")
 
 	// Agent WITHOUT agent:create scope.
 	priv, pub, _ := casket.DeriveAgentKey([]byte("owner-seed-32-bytes-padded-xxxxx"), "weak")
-	_, weak := adminPost(t, srv.URL+"/api/orgs/"+orgID+"/agents", map[string]any{
-		"display_name":      "weak",
-		"responsible_human": humanID,
-		"casket_pubkey":     base64.StdEncoding.EncodeToString(pub),
-		"scopes":            []string{"repo:read"}, // no agent:create
-	})
-	weakID, _ := weak["id"].(string)
+	weakID, _ := mkAgent(t, svc, orgID, humanID, "weak", pub, "repo:read") // no agent:create
 	tok := mintAgentToken(t, srv.URL, weakID, priv)
 
 	_, newPub, _ := casket.DeriveAgentKey([]byte("owner-seed-32-bytes-padded-xxxxx"), "child")
@@ -287,8 +302,85 @@ func TestSelfProvision_RequiresToken(t *testing.T) {
 	}
 }
 
-// adminPost is a doJSON with the admin bearer token.
-func adminPost(t *testing.T, url string, body any) (*http.Response, map[string]any) {
-	t.Helper()
-	return doJSON(t, "POST", url, adminToken, body)
+// TestSelfProvisionAgent_DuplicatePubkey_409 verifies the self-provision
+// endpoint returns 409 Conflict when the submitted casket pubkey is already
+// registered to another agent.
+func TestSelfProvisionAgent_DuplicatePubkey_409(t *testing.T) {
+	svc, _, srv := newStack(t)
+
+	orgID := mkOrg(t, svc, "acme-dup-selfprov")
+	humanID := mkHuman(t, svc, orgID, "jacinta")
+
+	// Bootstrap agent with agent:create scope (the self-provisioner caller).
+	bsPriv, bsPub, _ := casket.DeriveAgentKey([]byte("nex426-selfprov-dup-seed-32b-xx!"), "bootstrap")
+	bsID, _ := mkAgent(t, svc, orgID, humanID, "bootstrap", bsPub, "agent:create")
+	bsTok := mintAgentToken(t, srv.URL, bsID, bsPriv)
+
+	// The shared pubkey for the two duplicate self-provision attempts.
+	_, sharedPub, _ := casket.DeriveAgentKey([]byte("nex426-selfprov-dup-seed-32b-xx!"), "shared-child")
+
+	// First self-provision with the shared pubkey: should succeed.
+	resp, body := doJSON(t, "POST", srv.URL+"/api/agents", bsTok, map[string]any{
+		"display_name":  "child-one",
+		"casket_pubkey": base64.StdEncoding.EncodeToString(sharedPub),
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("first self-provision: expected 200, got %d %+v", resp.StatusCode, body)
+	}
+
+	// Second self-provision with the SAME pubkey: must return 409.
+	resp, body = doJSON(t, "POST", srv.URL+"/api/agents", bsTok, map[string]any{
+		"display_name":  "child-two",
+		"casket_pubkey": base64.StdEncoding.EncodeToString(sharedPub),
+	})
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("self-provision duplicate pubkey: expected 409, got %d %+v", resp.StatusCode, body)
+	}
+	if errMsg, _ := body["error"].(string); errMsg == "" {
+		t.Fatalf("409 response missing error field: %+v", body)
+	}
+}
+
+func TestAgentByFingerprint(t *testing.T) {
+	svc, _, srv := newStack(t)
+
+	orgID := mkOrg(t, svc, "acme")
+	humanID := mkHuman(t, svc, orgID, "jacinta")
+
+	_, pub, _ := casket.DeriveAgentKey([]byte("owner-seed-32-bytes-padded-xxxxx"), "anvil")
+	agentID, fp := mkAgent(t, svc, orgID, humanID, "anvil", pub, "repo:read", "repo:write")
+	if fp == "" {
+		t.Fatalf("agent create returned no fingerprint")
+	}
+
+	// Resolve by fingerprint (in-cluster service lookup; not admin-gated).
+	resp, got := doJSON(t, "GET", srv.URL+"/api/agents/by-fingerprint/"+fp, "", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("by-fingerprint: %d %+v", resp.StatusCode, got)
+	}
+	if got["id"] != agentID {
+		t.Fatalf("id = %v, want %q", got["id"], agentID)
+	}
+	if got["kind"] != "agent" {
+		t.Fatalf("kind = %v, want agent", got["kind"])
+	}
+	if got["fingerprint"] != fp {
+		t.Fatalf("fingerprint = %v, want %q", got["fingerprint"], fp)
+	}
+	if got["responsible_human"] != humanID {
+		t.Fatalf("responsible_human = %v, want %q", got["responsible_human"], humanID)
+	}
+	scopes, _ := got["scopes"].([]any)
+	if len(scopes) != 2 {
+		t.Fatalf("scopes = %v, want repo:read + repo:write", got["scopes"])
+	}
+	if got["active"] != true {
+		t.Fatalf("active = %v, want true", got["active"])
+	}
+
+	// Unknown fingerprint -> 404.
+	resp, _ = doJSON(t, "GET", srv.URL+"/api/agents/by-fingerprint/nope-nope-nope", "", nil)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("unknown fingerprint status = %d, want 404", resp.StatusCode)
+	}
 }
