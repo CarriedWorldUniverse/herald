@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 func (s *SQLite) RegisterIssuer(ctx context.Context, iss Issuer) (Issuer, error) {
@@ -29,6 +30,9 @@ func (s *SQLite) AddBinding(ctx context.Context, b FederatedBinding) (FederatedB
 		 VALUES (?, ?, ?, ?, ?)`,
 		b.ID, b.OrgID, b.UserID, b.IssuerID, b.Subject)
 	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed: federated_binding.org_id, federated_binding.issuer_id, federated_binding.subject") {
+			return FederatedBinding{}, ErrDuplicateFederatedBinding
+		}
 		return FederatedBinding{}, fmt.Errorf("AddBinding: %w", err)
 	}
 	return s.getBinding(ctx, b.ID)

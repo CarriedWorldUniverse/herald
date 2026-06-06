@@ -35,6 +35,8 @@ type Identity interface {
 	CreateOrgWithProducts(ctx context.Context, name string, products []string) (store.Org, error)
 	CreateHuman(ctx context.Context, orgID, displayName string) (store.User, error)
 	CreateAgent(ctx context.Context, orgID, displayName, responsibleHuman string, pub ed25519.PublicKey) (store.User, error)
+	RegisterIssuer(ctx context.Context, orgID, kind, ref string) (store.Issuer, error)
+	EnrollFederatedIdentity(ctx context.Context, orgID, displayName, issuerID, subject string) (store.User, error)
 	GrantScope(ctx context.Context, userID, scope, grantedBy string) error
 	SetHumanPassword(ctx context.Context, userID, plaintext string) error
 	GetUser(ctx context.Context, id string) (store.User, error)
