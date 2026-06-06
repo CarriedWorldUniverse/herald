@@ -331,6 +331,12 @@ func (s *SQLite) DeleteOrg(ctx context.Context, id string) error {
 		    OR granted_by IN (SELECT id FROM user WHERE org_id=?)`, id, id); err != nil {
 		return fmt.Errorf("DeleteOrg: scope_grant: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM federated_binding WHERE org_id=?`, id); err != nil {
+		return fmt.Errorf("DeleteOrg: federated_binding: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM issuer WHERE org_id=?`, id); err != nil {
+		return fmt.Errorf("DeleteOrg: issuer: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM org_product WHERE org_id=?`, id); err != nil {
 		return fmt.Errorf("DeleteOrg: org_product: %w", err)
 	}

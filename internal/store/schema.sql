@@ -39,6 +39,30 @@ CREATE TABLE IF NOT EXISTS scope_grant (
   UNIQUE(user_id, scope)
 );
 
+-- Org-scoped external identity issuers and enrolled subjects. A subject may be
+-- reused in another org without resolving here; inside one org the tuple maps
+-- to exactly one herald user.
+CREATE TABLE IF NOT EXISTS issuer (
+  id         TEXT PRIMARY KEY,                   -- uuid
+  org_id     TEXT NOT NULL REFERENCES org(id),
+  kind       TEXT NOT NULL,                      -- e.g. k8s
+  ref        TEXT NOT NULL,                      -- operator/provider reference
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(org_id, kind, ref)
+);
+CREATE INDEX IF NOT EXISTS idx_issuer_org ON issuer(org_id);
+
+CREATE TABLE IF NOT EXISTS federated_binding (
+  id         TEXT PRIMARY KEY,                   -- uuid
+  org_id     TEXT NOT NULL REFERENCES org(id),
+  user_id    TEXT NOT NULL REFERENCES user(id),
+  issuer_id  TEXT NOT NULL REFERENCES issuer(id),
+  subject    TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(org_id, issuer_id, subject)
+);
+CREATE INDEX IF NOT EXISTS idx_federated_binding_user ON federated_binding(user_id);
+
 -- Per-org product entitlement (deny-list): a product is ENABLED unless a row
 -- with enabled=0 exists. Absent row = enabled. herald is core (never listed).
 CREATE TABLE IF NOT EXISTS org_product (
