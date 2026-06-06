@@ -75,6 +75,29 @@ type ScopeGrant struct {
 	CreatedAt string
 }
 
+// Issuer is an org-scoped external identity provider. Kind selects the
+// verifier implementation (for NEX-474: k8s); Ref is the deployment-specific
+// issuer reference used by operators to distinguish clusters/providers.
+type Issuer struct {
+	ID        string
+	OrgID     string
+	Kind      string
+	Ref       string
+	CreatedAt string
+}
+
+// FederatedBinding enrolls an external {issuer, subject} as one herald user.
+// The tuple (OrgID, IssuerID, Subject) is unique, so a verified external
+// subject resolves to exactly one identity inside an org and never across orgs.
+type FederatedBinding struct {
+	ID        string
+	OrgID     string
+	UserID    string
+	IssuerID  string
+	Subject   string
+	CreatedAt string
+}
+
 // RefreshToken is a persisted, rotating refresh token. The plaintext secret is
 // never stored — only TokenHash (hex sha256). RevokedAt is empty when live.
 type RefreshToken struct {
@@ -118,6 +141,11 @@ type Store interface {
 	GrantScope(ctx context.Context, userID, scope, grantedBy string) (ScopeGrant, error)
 	RevokeScope(ctx context.Context, userID, scope string) error
 	ListScopes(ctx context.Context, userID string) ([]string, error)
+
+	// Federated identity enrollment.
+	RegisterIssuer(ctx context.Context, iss Issuer) (Issuer, error)
+	AddBinding(ctx context.Context, b FederatedBinding) (FederatedBinding, error)
+	ResolveBinding(ctx context.Context, orgID, issuerID, subject string) (userID string, err error)
 
 	// Refresh tokens (rotating; see RefreshToken).
 	CreateRefreshToken(ctx context.Context, rt RefreshToken) error
