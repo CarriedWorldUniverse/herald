@@ -1,5 +1,7 @@
 github.com/CarriedWorldUniverse/casket-go v0.1.0 h1:t+DvXs8vhaNcTfkSS/sqK47fBTNVRdHfF7DT/ur0jtY=
 github.com/CarriedWorldUniverse/casket-go v0.1.0/go.mod h1:v0y8kPW/WmusBw+Q3ZtRYhVwoK/WVVVXHWSc/oRVWBo=
+github.com/CarriedWorldUniverse/cwb-proto v0.0.0-20260606102406-f3236963a442 h1:RAigDovCVgT5FgGzloIqDjgUBYwjZ5wv5o/fBJpduoY=
+github.com/CarriedWorldUniverse/cwb-proto v0.0.0-20260606102406-f3236963a442/go.mod h1:SBXfS7WeuwK80SZrysL1YC0oDrNlNYoXqgWKkeK80wE=
 github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=
 github.com/cespare/xxhash/v2 v2.3.0/go.mod h1:VGX0DQ3Q6kWi7AoAeZDth3/j3BFtOZR5XLFGgcrjCOs=
 github.com/creack/pty v1.1.9/go.mod h1:oKZEueFk5CKHvIhNR5MUki03XCEU+Q6VDXinZuGJ33E=

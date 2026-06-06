@@ -1,9 +1,0 @@
-# Go
-*.test
-*.out
-
-# buf cache (local)
-.buf/
-
-# OS
-.DS_Store
