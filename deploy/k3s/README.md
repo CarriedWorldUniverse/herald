@@ -5,20 +5,24 @@ Single-node k3s deploy. herald is internal-only (`ClusterIP`); reach it via
 
 ## One-time secret
 
-The Deployment expects a `herald-secrets` Secret with `admin_token` (required)
-and optionally `signing_key` (base64 Ed25519 private, 64 bytes). Without
-`signing_key`, herald generates one on boot — fine for dev, **fatal for prod**
-because issued tokens won't survive a restart.
+The Deployment reads a `herald-secrets` Secret with:
+
+- `genesis_owner_password` — seeds the platform-admin owner
+  (`cwadmin@carriedworld.com`) at deploy time. No default account/password
+  ships in the image; admin authority is identity-derived (a herald JWT with
+  `herald:platform-admin`), not a static token.
+- `signing_key` (optional) — base64 Ed25519 private, 64 bytes. Without it,
+  herald generates one on boot — fine for dev, **fatal for prod** because
+  issued tokens won't survive a restart.
 
 ```sh
-# generate an admin token
-ADMIN_TOKEN=$(openssl rand -hex 32)
+# generate the admin-org owner password
+OWNER_PW=$(openssl rand -hex 16)
 
-# create the secret (admin_token only; signing_key added later for prod)
 kubectl -n cwb create secret generic herald-secrets \
-  --from-literal=admin_token="$ADMIN_TOKEN"
+  --from-literal=genesis_owner_password="$OWNER_PW"
 
-echo "HERALD_ADMIN_TOKEN=$ADMIN_TOKEN"  # save somewhere safe
+echo "cwadmin@carriedworld.com password = $OWNER_PW"  # save somewhere safe
 ```
 
 ## Apply

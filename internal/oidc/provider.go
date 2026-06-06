@@ -48,6 +48,7 @@ type Provider struct {
 	signer   jose.Signer
 	now      func() time.Time
 	tokenEP  TokenHandler // optional; set by the agent-grant task
+	revokeEP http.Handler // optional; POST /revoke
 }
 
 // TokenHandler handles POST /token. Wired by the agent-grant task; nil yields
@@ -92,8 +93,20 @@ func NewProvider(cfg Config) (*Provider, error) {
 // SetTokenHandler wires the POST /token handler (agent-grant task).
 func (p *Provider) SetTokenHandler(h TokenHandler) { p.tokenEP = h }
 
+// SetRevokeHandler wires POST /revoke (refresh-token revocation).
+func (p *Provider) SetRevokeHandler(h http.Handler) { p.revokeEP = h }
+
 // Issuer returns the configured issuer URL.
 func (p *Provider) Issuer() string { return p.issuer }
+
+// TokenURL returns the canonical token endpoint URL — issuer + "/token". This
+// is what the discovery doc advertises as `token_endpoint` and what agents
+// MUST use as the audience claim in their jwt-bearer assertions. Comparing
+// the assertion's audience against this (instead of the inbound request URL)
+// lets herald sit behind a reverse proxy without breaking authentication.
+func (p *Provider) TokenURL() string {
+	return strings.TrimRight(p.issuer, "/") + "/token"
+}
 
 // TTL returns the access-token lifetime.
 func (p *Provider) TTL() time.Duration { return p.ttl }
@@ -167,6 +180,7 @@ func (p *Provider) Handler() http.Handler {
 	mux.HandleFunc("GET /.well-known/openid-configuration", p.handleDiscovery)
 	mux.HandleFunc("GET /jwks", p.handleJWKS)
 	mux.HandleFunc("POST /token", p.handleToken)
+	mux.HandleFunc("POST /revoke", p.handleRevoke)
 	return mux
 }
 
@@ -179,8 +193,9 @@ func (p *Provider) handleDiscovery(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"issuer":                                p.issuer,
 		"jwks_uri":                              base + "/jwks",
-		"token_endpoint":                        base + "/token",
-		"grant_types_supported":                 []string{"urn:ietf:params:oauth:grant-type:jwt-bearer"},
+		"token_endpoint":                        p.TokenURL(),
+		"grant_types_supported":                 []string{"urn:ietf:params:oauth:grant-type:jwt-bearer", "password", "refresh_token"},
+		"revocation_endpoint":                   base + "/revoke",
 		"id_token_signing_alg_values_supported": []string{"EdDSA"},
 		"token_endpoint_auth_methods_supported": []string{"private_key_jwt"},
 		"response_types_supported":              []string{"token"},
@@ -193,6 +208,14 @@ func (p *Provider) handleToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p.tokenEP.ServeToken(w, r)
+}
+
+func (p *Provider) handleRevoke(w http.ResponseWriter, r *http.Request) {
+	if p.revokeEP == nil {
+		http.Error(w, `{"error":"revocation not configured"}`, http.StatusNotImplemented)
+		return
+	}
+	p.revokeEP.ServeHTTP(w, r)
 }
 
 // keyID derives a stable kid from the public key (base64url(sha256(pub)[:8])).

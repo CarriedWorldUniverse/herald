@@ -11,32 +11,44 @@
 //	HERALD_DB           sqlite path (default /var/lib/nexus/herald.db; ":memory:" ok)
 //	HERALD_ISSUER       OIDC issuer URL (default http://<addr>/) — set to the
 //	                    externally-reachable https URL in production
-//	HERALD_ADMIN_TOKEN  bearer token gating the bootstrap endpoints (required)
+//	HERALD_REFRESH_TTL  refresh-token lifetime (Go duration, e.g. "720h"; default 30d)
 //	HERALD_SIGNING_KEY  base64(std) Ed25519 private key (64 bytes). If unset, a
 //	                    key is generated on boot and its public JWKS logged —
 //	                    fine for dev, NOT for prod (tokens won't survive restart).
 package main
 
 import (
+	"context"
 	"crypto/ed25519"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/CarriedWorldUniverse/herald/internal/adminapi"
+	"github.com/CarriedWorldUniverse/herald/internal/grpcadmin"
 	"github.com/CarriedWorldUniverse/herald/internal/identity"
+	"github.com/CarriedWorldUniverse/herald/internal/issuer"
 	"github.com/CarriedWorldUniverse/herald/internal/oidc"
+	"github.com/CarriedWorldUniverse/herald/internal/purge"
 	"github.com/CarriedWorldUniverse/herald/internal/store"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/health"
+	grpc_health_v1 "google.golang.org/grpc/health/grpc_health_v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 )
 
 func main() {
 	addr := env("HERALD_ADDR", ":8099")
 	dbPath := env("HERALD_DB", "/var/lib/nexus/herald.db")
-	adminToken := os.Getenv("HERALD_ADMIN_TOKEN")
-	if adminToken == "" {
-		log.Fatal("herald: HERALD_ADMIN_TOKEN is required")
-	}
 	issuer := env("HERALD_ISSUER", "http://"+addr+"/")
 
 	signKey, err := loadOrGenSigningKey()
@@ -56,21 +68,80 @@ func main() {
 	if err != nil {
 		log.Fatalf("herald: provider: %v", err)
 	}
-	provider.SetTokenHandler(oidc.NewAgentGrant(provider, idsvc))
+	refreshTTL := envDuration("HERALD_REFRESH_TTL", 0) // 0 -> issuer default (30d)
+	refresh := oidc.NewRefreshIssuer(provider, st, refreshTTL)
+	issuerRegistry := buildIssuerRegistry(provider.TokenURL())
+	provider.SetTokenHandler(oidc.NewGrantMux(
+		oidc.NewAgentGrant(provider, idsvc, refresh),
+		oidc.NewHumanGrant(provider, idsvc, refresh),
+		oidc.NewRefreshGrant(provider, idsvc, refresh),
+		oidc.NewFederatedGrant(provider, idsvc, st, issuerRegistry, refresh),
+	))
+	provider.SetRevokeHandler(oidc.NewRevokeHandler(refresh))
 
-	api := adminapi.New(idsvc, provider, adminToken)
+	gatewayBase := os.Getenv("HERALD_GATEWAY_URL")
+	if gatewayBase == "" {
+		gatewayBase = strings.TrimSuffix(strings.TrimRight(issuer, "/")+"/", "/herald/")
+	}
+	purger := purge.New(gatewayBase, &http.Client{Timeout: 30 * time.Second})
+
+	api := adminapi.New(idsvc, provider)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"ok","service":"herald"}`))
 	})
-	// OIDC endpoints: discovery, JWKS, token.
+	// OIDC endpoints: discovery, JWKS, token, revoke.
 	mux.Handle("/.well-known/", provider.Handler())
 	mux.Handle("/jwks", provider.Handler())
 	mux.Handle("/token", provider.Handler())
-	// Provisioning + admin.
+	mux.Handle("/revoke", provider.Handler())
+	// Token-authed provisioning (self-provision, validate) + the in-cluster
+	// by-fingerprint lookup. The org/human/product admin surface lives in the
+	// gRPC AdminService below (identity-derived authz, no static admin token).
 	mux.Handle("/api/", api.Handler())
+
+	// Genesis (Phase 4): idempotently provision the admin (administration) org +
+	// platform-admin owner from a deploy secret — no shipped default account or
+	// password. No-op if the admin org already exists or the secret is unset.
+	if ownerID, gErr := grpcadmin.Seed(context.Background(), idsvc, grpcadmin.SeedConfig{
+		AdminOrgName:     env("HERALD_GENESIS_ORG", "cwb-admin"),
+		OwnerDisplayName: env("HERALD_GENESIS_OWNER", "cwadmin@carriedworld.com"),
+		OwnerPassword:    os.Getenv("HERALD_GENESIS_OWNER_PASSWORD"),
+	}); gErr != nil {
+		log.Printf("herald: genesis skipped: %v", gErr)
+	} else if ownerID != "" {
+		log.Printf("herald: genesis seeded admin-org owner (login username = id %s) with %s", ownerID, grpcadmin.ScopePlatformAdmin)
+	}
+
+	// gRPC admin/internal API (Phase 4) over mTLS, fronted by interchange. OPT-IN:
+	// it starts only when mTLS certs are configured (or the dev opt-in is set).
+	// This is now the ONLY path to org/human/product admin (the static-admin-token
+	// HTTP surface was retired in Phase 5); authz is identity-derived from the
+	// herald JWT injected by interchange.
+	if os.Getenv("HERALD_TLS_CERT") != "" || os.Getenv("HERALD_DEV_INSECURE") == "1" {
+		grpcAddr := env("HERALD_GRPC_ADDR", ":8098")
+		grpcSrv := grpc.NewServer(heraldGRPCServerOptions()...)
+		grpcadmin.New(idsvc, provider, purger).Register(grpcSrv)
+		healthSrv := health.NewServer()
+		grpc_health_v1.RegisterHealthServer(grpcSrv, healthSrv)
+		for _, svc := range []string{"cwb.herald.v1.AdminService", "cwb.herald.v1.AgentService"} {
+			healthSrv.SetServingStatus(svc, grpc_health_v1.HealthCheckResponse_SERVING)
+		}
+		grpcLn, lErr := net.Listen("tcp", grpcAddr)
+		if lErr != nil {
+			log.Fatalf("herald: grpc listen %s: %v", grpcAddr, lErr)
+		}
+		go func() {
+			log.Printf("herald grpc (admin) listening on %s", grpcAddr)
+			if err := grpcSrv.Serve(grpcLn); err != nil {
+				log.Fatalf("herald: grpc: %v", err)
+			}
+		}()
+	} else {
+		log.Printf("herald: gRPC admin disabled (set HERALD_TLS_* or HERALD_DEV_INSECURE=1 to enable)")
+	}
 
 	log.Printf("herald listening on %s (issuer=%s, db=%s)", addr, issuer, dbPath)
 	if err := http.ListenAndServe(addr, mux); err != nil {
@@ -78,9 +149,85 @@ func main() {
 	}
 }
 
+// heraldGRPCServerOptions builds herald's gRPC server options. With HERALD_TLS_*
+// set it enforces mTLS (RequireAndVerifyClientCert vs the cwb-ca); a partial cert
+// set is fatal; HERALD_DEV_INSECURE=1 (and no certs) runs insecure for local dev.
+// Mirrors the other pillars.
+func heraldGRPCServerOptions() []grpc.ServerOption {
+	certFile := os.Getenv("HERALD_TLS_CERT")
+	keyFile := os.Getenv("HERALD_TLS_KEY")
+	caFile := os.Getenv("HERALD_TLS_CA")
+	if certFile == "" || keyFile == "" || caFile == "" {
+		if os.Getenv("HERALD_DEV_INSECURE") == "1" {
+			log.Printf("herald: HERALD_DEV_INSECURE=1 — gRPC admin WITHOUT mTLS (dev only)")
+			return nil
+		}
+		log.Fatalf("herald: gRPC mTLS requires HERALD_TLS_CERT/_KEY/_CA (or HERALD_DEV_INSECURE=1)")
+	}
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		log.Fatalf("herald: tls: load cert/key: %v", err)
+	}
+	caPEM, err := os.ReadFile(caFile)
+	if err != nil {
+		log.Fatalf("herald: tls: read CA: %v", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caPEM) {
+		log.Fatalf("herald: tls: no certs parsed from CA file %s", caFile)
+	}
+	return []grpc.ServerOption{grpc.Creds(credentials.NewTLS(&tls.Config{
+		Certificates: []tls.Certificate{cert},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:    pool,
+		MinVersion:   tls.VersionTLS13,
+	}))}
+}
+
+func buildIssuerRegistry(defaultAudience string) *issuer.Registry {
+	reg := issuer.NewRegistry()
+	issuerID := os.Getenv("HERALD_K8S_ISSUER_ID")
+	if issuerID == "" {
+		log.Printf("herald: federated k8s grant disabled (set HERALD_K8S_ISSUER_ID to enable)")
+		return reg
+	}
+
+	cfg, err := kubernetesConfig()
+	if err != nil {
+		log.Printf("herald: federated k8s grant disabled: kubernetes config: %v", err)
+		return reg
+	}
+	client, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		log.Printf("herald: federated k8s grant disabled: kubernetes client: %v", err)
+		return reg
+	}
+	audience := env("HERALD_K8S_AUDIENCE", defaultAudience)
+	reg.Register(issuerID, issuer.NewKubernetesVerifier(client, audience))
+	log.Printf("herald: federated k8s grant enabled issuer_id=%s audience=%s", issuerID, audience)
+	return reg
+}
+
+func kubernetesConfig() (*rest.Config, error) {
+	if kubeconfig := os.Getenv("HERALD_K8S_KUBECONFIG"); kubeconfig != "" {
+		return clientcmd.BuildConfigFromFlags("", kubeconfig)
+	}
+	return rest.InClusterConfig()
+}
+
 func env(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return def
+}
+
+func envDuration(key string, def time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+		log.Printf("herald: ignoring invalid %s=%q", key, v)
 	}
 	return def
 }
