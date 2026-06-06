@@ -33,6 +33,7 @@ import (
 	"github.com/CarriedWorldUniverse/herald/internal/adminapi"
 	"github.com/CarriedWorldUniverse/herald/internal/grpcadmin"
 	"github.com/CarriedWorldUniverse/herald/internal/identity"
+	"github.com/CarriedWorldUniverse/herald/internal/issuer"
 	"github.com/CarriedWorldUniverse/herald/internal/oidc"
 	"github.com/CarriedWorldUniverse/herald/internal/purge"
 	"github.com/CarriedWorldUniverse/herald/internal/store"
@@ -40,6 +41,9 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/health"
 	grpc_health_v1 "google.golang.org/grpc/health/grpc_health_v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 )
 
 func main() {
@@ -66,10 +70,12 @@ func main() {
 	}
 	refreshTTL := envDuration("HERALD_REFRESH_TTL", 0) // 0 -> issuer default (30d)
 	refresh := oidc.NewRefreshIssuer(provider, st, refreshTTL)
+	issuerRegistry := buildIssuerRegistry(provider.TokenURL())
 	provider.SetTokenHandler(oidc.NewGrantMux(
 		oidc.NewAgentGrant(provider, idsvc, refresh),
 		oidc.NewHumanGrant(provider, idsvc, refresh),
 		oidc.NewRefreshGrant(provider, idsvc, refresh),
+		oidc.NewFederatedGrant(provider, idsvc, st, issuerRegistry, refresh),
 	))
 	provider.SetRevokeHandler(oidc.NewRevokeHandler(refresh))
 
@@ -176,6 +182,37 @@ func heraldGRPCServerOptions() []grpc.ServerOption {
 		ClientCAs:    pool,
 		MinVersion:   tls.VersionTLS13,
 	}))}
+}
+
+func buildIssuerRegistry(defaultAudience string) *issuer.Registry {
+	reg := issuer.NewRegistry()
+	issuerID := os.Getenv("HERALD_K8S_ISSUER_ID")
+	if issuerID == "" {
+		log.Printf("herald: federated k8s grant disabled (set HERALD_K8S_ISSUER_ID to enable)")
+		return reg
+	}
+
+	cfg, err := kubernetesConfig()
+	if err != nil {
+		log.Printf("herald: federated k8s grant disabled: kubernetes config: %v", err)
+		return reg
+	}
+	client, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		log.Printf("herald: federated k8s grant disabled: kubernetes client: %v", err)
+		return reg
+	}
+	audience := env("HERALD_K8S_AUDIENCE", defaultAudience)
+	reg.Register(issuerID, issuer.NewKubernetesVerifier(client, audience))
+	log.Printf("herald: federated k8s grant enabled issuer_id=%s audience=%s", issuerID, audience)
+	return reg
+}
+
+func kubernetesConfig() (*rest.Config, error) {
+	if kubeconfig := os.Getenv("HERALD_K8S_KUBECONFIG"); kubeconfig != "" {
+		return clientcmd.BuildConfigFromFlags("", kubeconfig)
+	}
+	return rest.InClusterConfig()
 }
 
 func env(key, def string) string {
