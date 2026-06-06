@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
+	"errors"
 	"strings"
 
 	heraldv1 "github.com/CarriedWorldUniverse/cwb-proto/gen/go/cwb/herald/v1"
@@ -166,6 +167,46 @@ func (a *adminServer) CreateAgent(ctx context.Context, r *heraldv1.CreateAgentRe
 	return &heraldv1.CreateAgentResponse{Agent: toProtoAgent(ag, scopes)}, nil
 }
 
+func (a *adminServer) RegisterIssuer(ctx context.Context, r *heraldv1.RegisterIssuerRequest) (*heraldv1.RegisterIssuerResponse, error) {
+	if _, err := requireOrgAdmin(ctx, r.Org); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(r.Kind) == "" {
+		return nil, status.Error(codes.InvalidArgument, "kind required")
+	}
+	if strings.TrimSpace(r.Ref) == "" {
+		return nil, status.Error(codes.InvalidArgument, "ref required")
+	}
+	iss, err := a.s.id.RegisterIssuer(ctx, r.Org, r.Kind, r.Ref)
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	return &heraldv1.RegisterIssuerResponse{Issuer: toProtoIssuer(iss)}, nil
+}
+
+func (a *adminServer) EnrollFederatedIdentity(ctx context.Context, r *heraldv1.EnrollFederatedIdentityRequest) (*heraldv1.EnrollFederatedIdentityResponse, error) {
+	if _, err := requireOrgAdmin(ctx, r.Org); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(r.DisplayName) == "" {
+		return nil, status.Error(codes.InvalidArgument, "display_name required")
+	}
+	if strings.TrimSpace(r.IssuerId) == "" {
+		return nil, status.Error(codes.InvalidArgument, "issuer_id required")
+	}
+	if strings.TrimSpace(r.Subject) == "" {
+		return nil, status.Error(codes.InvalidArgument, "subject required")
+	}
+	u, err := a.s.id.EnrollFederatedIdentity(ctx, r.Org, r.DisplayName, r.IssuerId, r.Subject)
+	if err != nil {
+		if errors.Is(err, store.ErrDuplicateFederatedBinding) {
+			return nil, status.Error(codes.AlreadyExists, "federated identity already enrolled")
+		}
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	return &heraldv1.EnrollFederatedIdentityResponse{Identity: toProtoAgent(u, nil)}, nil
+}
+
 func (a *adminServer) SetHumanPassword(ctx context.Context, r *heraldv1.SetHumanPasswordRequest) (*heraldv1.SetHumanPasswordResponse, error) {
 	human, err := a.s.id.GetUser(ctx, r.Id)
 	if err != nil {
@@ -268,5 +309,14 @@ func toProtoAgent(u store.User, scopes []string) *heraldv1.Agent {
 		Status:           string(u.Status),
 		Active:           u.Status == store.StatusActive,
 		Scopes:           scopes,
+	}
+}
+
+func toProtoIssuer(iss store.Issuer) *heraldv1.Issuer {
+	return &heraldv1.Issuer{
+		Id:   iss.ID,
+		Org:  iss.OrgID,
+		Kind: iss.Kind,
+		Ref:  iss.Ref,
 	}
 }

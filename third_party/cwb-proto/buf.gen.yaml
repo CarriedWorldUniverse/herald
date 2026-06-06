@@ -1,0 +1,22 @@
+version: v2
+managed:
+  enabled: true
+  override:
+    - file_option: go_package_prefix
+      value: github.com/CarriedWorldUniverse/cwb-proto/gen/go
+      path: proto
+plugins:
+  - local: protoc-gen-go
+    out: gen/go
+    opt: paths=source_relative
+  - local: protoc-gen-go-grpc
+    out: gen/go
+    opt: paths=source_relative
+  - local: protoc-gen-grpc-gateway
+    out: gen/go
+    # allow_delete_body: herald's DeleteOrg is DELETE /api/orgs/{id} with a
+    # confirm-by-name body. No existing DELETE carries a body, so this only
+    # affects herald.v1's generated gateway.
+    opt:
+      - paths=source_relative
+      - allow_delete_body=true

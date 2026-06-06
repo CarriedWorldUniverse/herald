@@ -4,7 +4,7 @@ go 1.26.3
 
 require (
 	github.com/CarriedWorldUniverse/casket-go v0.1.0
-	github.com/CarriedWorldUniverse/cwb-proto v0.0.0-20260603001141-c76ceb4abace
+	github.com/CarriedWorldUniverse/cwb-proto v0.0.0-20260604030930-888c5480b950
 	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/google/uuid v1.6.0
 	golang.org/x/crypto v0.48.0
@@ -62,3 +62,5 @@ require (
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.2 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
+
+replace github.com/CarriedWorldUniverse/cwb-proto => ./third_party/cwb-proto

@@ -58,6 +58,55 @@ func (svc *Service) CreateHuman(ctx context.Context, orgID, displayName string) 
 	})
 }
 
+// RegisterIssuer creates an org-scoped external identity provider.
+func (svc *Service) RegisterIssuer(ctx context.Context, orgID, kind, ref string) (store.Issuer, error) {
+	if orgID == "" {
+		return store.Issuer{}, errors.New("identity: org required")
+	}
+	if kind == "" {
+		return store.Issuer{}, errors.New("identity: issuer kind required")
+	}
+	if ref == "" {
+		return store.Issuer{}, errors.New("identity: issuer ref required")
+	}
+	return svc.store.RegisterIssuer(ctx, store.Issuer{
+		OrgID: orgID,
+		Kind:  kind,
+		Ref:   ref,
+	})
+}
+
+// EnrollFederatedIdentity creates an agent identity and binds it to an external
+// issuer subject for the federated grant.
+func (svc *Service) EnrollFederatedIdentity(ctx context.Context, orgID, displayName, issuerID, subject string) (store.User, error) {
+	if displayName == "" {
+		return store.User{}, errors.New("identity: display name required")
+	}
+	if issuerID == "" {
+		return store.User{}, errors.New("identity: issuer required")
+	}
+	if subject == "" {
+		return store.User{}, errors.New("identity: subject required")
+	}
+	u, err := svc.store.CreateUser(ctx, store.User{
+		OrgID:       orgID,
+		Kind:        store.KindAgent,
+		DisplayName: displayName,
+	})
+	if err != nil {
+		return store.User{}, fmt.Errorf("identity.EnrollFederatedIdentity: create user: %w", err)
+	}
+	if _, err := svc.store.AddBinding(ctx, store.FederatedBinding{
+		OrgID:    orgID,
+		UserID:   u.ID,
+		IssuerID: issuerID,
+		Subject:  subject,
+	}); err != nil {
+		return store.User{}, fmt.Errorf("identity.EnrollFederatedIdentity: add binding: %w", err)
+	}
+	return u, nil
+}
+
 // CreateAgent creates an agent owned by (responsible to) the given human, in
 // the same org, with status Active. Used by the admin-bootstrap path (the
 // first agents, before any agent token exists). For self-provisioned agents

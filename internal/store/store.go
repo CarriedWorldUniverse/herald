@@ -39,6 +39,10 @@ var ErrNotFound = errors.New("store: not found")
 // casket fingerprint already bound to another agent. A casket key = one agent.
 var ErrDuplicateFingerprint = errors.New("store: casket fingerprint already registered")
 
+// ErrDuplicateFederatedBinding is returned when an issuer subject is already
+// enrolled for an org.
+var ErrDuplicateFederatedBinding = errors.New("store: federated binding already registered")
+
 // Org is a tenant + accountability root. Flat for MVP (no manager tree).
 type Org struct {
 	ID        string
