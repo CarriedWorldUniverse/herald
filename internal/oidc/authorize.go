@@ -1,7 +1,10 @@
 package oidc
 
 import (
+	"crypto/rand"
+	"crypto/subtle"
 	_ "embed"
+	"encoding/base64"
 	"html/template"
 	"log"
 	"net/http"
@@ -28,7 +31,34 @@ func NewAuthorize(clients *ClientRegistry, codes *CodeStore, humans HumanResolve
 }
 
 type loginPage struct {
-	ClientID, RedirectURI, State, CodeChallenge, Error string
+	ClientID, RedirectURI, State, CodeChallenge, CSRFToken, Error string
+}
+
+// csrfCookieName carries the double-submit CSRF token for the login form.
+// The __Host- prefix binds the cookie to this origin: it requires Secure,
+// Path=/ and no Domain attribute — keep all three exactly as set below.
+const csrfCookieName = "__Host-herald_authz_csrf"
+
+// issueCSRF mints a login CSRF token, sets it as a short-lived cookie, and
+// returns it for embedding in the form (double-submit pattern — herald keeps
+// no server-side login session to bind a token to).
+func issueCSRF(w http.ResponseWriter) string {
+	b := make([]byte, 32)
+	_, _ = rand.Read(b) // never fails on Linux/macOS/Windows; blank-discard intentional (see refresh.go)
+	token := base64.RawURLEncoding.EncodeToString(b)
+	http.SetCookie(w, &http.Cookie{
+		Name: csrfCookieName, Value: token, Path: "/",
+		Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: 600,
+	})
+	return token
+}
+
+// expireCSRF clears the CSRF cookie — each token is single-use.
+func expireCSRF(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name: csrfCookieName, Value: "", Path: "/",
+		Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: -1,
+	})
 }
 
 // validate checks the OAuth params shared by GET and POST. Failures return a
@@ -61,6 +91,7 @@ func (a *Authorize) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid authorization request: "+msg, http.StatusBadRequest)
 			return
 		}
+		p.CSRFToken = issueCSRF(w)
 		a.render(w, http.StatusOK, p)
 	case http.MethodPost:
 		if err := r.ParseForm(); err != nil {
@@ -72,12 +103,25 @@ func (a *Authorize) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid authorization request: "+msg, http.StatusBadRequest)
 			return
 		}
+		// CSRF double-submit check: the cookie set on GET must match the
+		// hidden form field, before any credential is examined. Failures are
+		// a plain 403 — never a redirect.
+		cookie, err := r.Cookie(csrfCookieName)
+		field := r.Form.Get("csrf_token")
+		if err != nil || cookie.Value == "" || field == "" ||
+			subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(field)) != 1 {
+			http.Error(w, "csrf validation failed", http.StatusForbidden)
+			return
+		}
 		u, err := a.humans.VerifyHumanPassword(r.Context(), r.Form.Get("username"), r.Form.Get("password"))
 		if err != nil {
 			p.Error = "login failed — check your user id and password"
+			// Tokens are single-use: rotate the cookie + field for the retry.
+			p.CSRFToken = issueCSRF(w)
 			a.render(w, http.StatusOK, p)
 			return
 		}
+		expireCSRF(w) // single-use: consumed by the successful login
 		code := a.codes.Issue(PendingAuth{
 			ClientID: p.ClientID, RedirectURI: p.RedirectURI,
 			UserID: u.ID, CodeChallenge: p.CodeChallenge,

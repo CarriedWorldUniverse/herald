@@ -106,6 +106,17 @@ func TestProvider_Discovery(t *testing.T) {
 	if !containsString(grants, "urn:ietf:params:oauth:grant-type:jwt-bearer") {
 		t.Fatalf("jwt-bearer dropped from grant_types_supported: %v", grants)
 	}
+
+	// OIDC discovery conformance: subject_types_supported is REQUIRED, and
+	// public clients (PKCE, no credential) need "none" advertised alongside
+	// private_key_jwt at the token endpoint.
+	if got := anyStrings(d["subject_types_supported"]); len(got) != 1 || got[0] != "public" {
+		t.Fatalf("subject_types_supported = %v (want exactly [public])", d["subject_types_supported"])
+	}
+	authMethods := anyStrings(d["token_endpoint_auth_methods_supported"])
+	if !containsString(authMethods, "private_key_jwt") || !containsString(authMethods, "none") {
+		t.Fatalf("token_endpoint_auth_methods_supported = %v (want private_key_jwt and none)", authMethods)
+	}
 }
 
 // anyStrings converts a decoded-JSON []any into []string.

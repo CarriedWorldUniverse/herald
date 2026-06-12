@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -87,17 +88,41 @@ func TestAuthorizationCodeFlowEndToEnd(t *testing.T) {
 			t.Fatalf("login form missing %s; body = %s", want, page)
 		}
 	}
+	// Capture the CSRF double-submit pair the browser would hold: the
+	// __Host- cookie from Set-Cookie and the hidden csrf_token form field.
+	// Replayed manually rather than via a cookiejar: Go's jar (correctly)
+	// refuses to send Secure cookies back over the plain-HTTP httptest URL.
+	var csrfCookie *http.Cookie
+	for _, c := range resp.Cookies() {
+		if strings.Contains(c.Name, "herald_authz_csrf") {
+			csrfCookie = c
+		}
+	}
+	if csrfCookie == nil || csrfCookie.Value == "" {
+		t.Fatalf("GET /authorize did not set CSRF cookie; got %v", resp.Cookies())
+	}
+	m := regexp.MustCompile(`name="csrf_token" value="([^"]+)"`).FindSubmatch(page)
+	if m == nil {
+		t.Fatalf("csrf_token hidden field missing from login form: %s", page)
+	}
 
-	// Step 2: the user submits credentials; herald redirects back to the
-	// client with a single-use code and the round-tripped state.
+	// Step 2: the user submits credentials (+ the CSRF pair); herald
+	// redirects back to the client with a single-use code and the
+	// round-tripped state.
 	noRedirect := &http.Client{
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
-	form := url.Values{"username": {h.ID}, "password": {"hunter2hunter2"}}
+	form := url.Values{"username": {h.ID}, "password": {"hunter2hunter2"}, "csrf_token": {string(m[1])}}
 	for k, v := range authzParams {
 		form[k] = v
 	}
-	resp, err = noRedirect.PostForm(srv.URL+"/authorize", form)
+	postReq, err := http.NewRequest("POST", srv.URL+"/authorize", strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatalf("build POST /authorize: %v", err)
+	}
+	postReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	postReq.AddCookie(&http.Cookie{Name: csrfCookie.Name, Value: csrfCookie.Value})
+	resp, err = noRedirect.Do(postReq)
 	if err != nil {
 		t.Fatalf("POST /authorize: %v", err)
 	}

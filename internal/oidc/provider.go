@@ -209,9 +209,10 @@ func (p *Provider) handleDiscovery(w http.ResponseWriter, _ *http.Request) {
 		"grant_types_supported":                 []string{"urn:ietf:params:oauth:grant-type:jwt-bearer", "password", "refresh_token", "authorization_code"},
 		"revocation_endpoint":                   base + "/revoke",
 		"id_token_signing_alg_values_supported": []string{"EdDSA"},
-		"token_endpoint_auth_methods_supported": []string{"private_key_jwt"},
+		"token_endpoint_auth_methods_supported": []string{"private_key_jwt", "none"}, // "none": public clients (PKCE) don't authenticate at /token
 		"response_types_supported":              []string{"code"},
 		"code_challenge_methods_supported":      []string{"S256"},
+		"subject_types_supported":               []string{"public"},
 	})
 }
 

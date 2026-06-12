@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -39,6 +40,57 @@ func newAuthorizeForTest(t *testing.T) *Authorize {
 
 const authzQuery = "client_id=atlas&redirect_uri=https%3A%2F%2Fa%2Fcb&response_type=code&state=xyz&code_challenge=abc123&code_challenge_method=S256"
 
+var csrfFieldRE = regexp.MustCompile(`name="csrf_token" value="([^"]+)"`)
+
+// getLoginForm simulates the browser GET /authorize: returns the CSRF cookie
+// the server set and the matching csrf_token hidden-field value from the
+// rendered form (the double-submit pair the POST must echo back).
+func getLoginForm(t *testing.T, a *Authorize) (*http.Cookie, string) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	a.ServeHTTP(rec, httptest.NewRequest("GET", "/authorize?"+authzQuery, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /authorize status %d body %s", rec.Code, rec.Body.String())
+	}
+	var cookie *http.Cookie
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == csrfCookieName {
+			cookie = c
+		}
+	}
+	if cookie == nil || cookie.Value == "" {
+		t.Fatal("GET /authorize did not set the CSRF cookie")
+	}
+	m := csrfFieldRE.FindStringSubmatch(rec.Body.String())
+	if m == nil {
+		t.Fatal("csrf_token hidden field missing from login form")
+	}
+	if m[1] != cookie.Value {
+		t.Fatalf("hidden field %q != cookie %q (double-submit pair must match)", m[1], cookie.Value)
+	}
+	return cookie, m[1]
+}
+
+// postAuthorize sends a login POST, attaching cookie when non-nil.
+func postAuthorize(a *Authorize, form url.Values, cookie *http.Cookie) *httptest.ResponseRecorder {
+	req := httptest.NewRequest("POST", "/authorize", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if cookie != nil {
+		req.AddCookie(cookie)
+	}
+	rec := httptest.NewRecorder()
+	a.ServeHTTP(rec, req)
+	return rec
+}
+
+func validLoginForm() url.Values {
+	return url.Values{
+		"client_id": {"atlas"}, "redirect_uri": {"https://a/cb"}, "response_type": {"code"},
+		"state": {"xyz"}, "code_challenge": {"abc123"}, "code_challenge_method": {"S256"},
+		"username": {"u-good"}, "password": {"pw"},
+	}
+}
+
 func TestAuthorizeGetRendersForm(t *testing.T) {
 	a := newAuthorizeForTest(t)
 	rec := httptest.NewRecorder()
@@ -47,10 +99,22 @@ func TestAuthorizeGetRendersForm(t *testing.T) {
 		t.Fatalf("status %d body %s", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	for _, want := range []string{`name="username"`, `name="password"`, `value="xyz"`, `value="abc123"`} {
+	for _, want := range []string{`name="username"`, `name="password"`, `value="xyz"`, `value="abc123"`, `name="csrf_token"`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("form missing %s", want)
 		}
+	}
+	var csrf *http.Cookie
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == csrfCookieName {
+			csrf = c
+		}
+	}
+	if csrf == nil {
+		t.Fatal("CSRF cookie not set on GET")
+	}
+	if !csrf.Secure || !csrf.HttpOnly || csrf.Path != "/" || csrf.SameSite != http.SameSiteLaxMode || csrf.MaxAge != 600 {
+		t.Errorf("CSRF cookie flags wrong: %+v", csrf)
 	}
 }
 
@@ -76,17 +140,22 @@ func TestAuthorizeGetRejectsBadClientWithoutRedirect(t *testing.T) {
 
 func TestAuthorizePostGoodLoginRedirectsWithCode(t *testing.T) {
 	a := newAuthorizeForTest(t)
-	form := url.Values{
-		"client_id": {"atlas"}, "redirect_uri": {"https://a/cb"}, "response_type": {"code"},
-		"state": {"xyz"}, "code_challenge": {"abc123"}, "code_challenge_method": {"S256"},
-		"username": {"u-good"}, "password": {"pw"},
-	}
-	req := httptest.NewRequest("POST", "/authorize", strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	rec := httptest.NewRecorder()
-	a.ServeHTTP(rec, req)
+	cookie, token := getLoginForm(t, a)
+	form := validLoginForm()
+	form.Set("csrf_token", token)
+	rec := postAuthorize(a, form, cookie)
 	if rec.Code != http.StatusFound {
 		t.Fatalf("status %d body %s", rec.Code, rec.Body.String())
+	}
+	// Single-use: the successful login must expire the CSRF cookie.
+	expired := false
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == csrfCookieName && c.MaxAge < 0 {
+			expired = true
+		}
+	}
+	if !expired {
+		t.Error("CSRF cookie not expired on successful login")
 	}
 	loc, err := url.Parse(rec.Header().Get("Location"))
 	if err != nil || loc.Host != "a" {
@@ -107,15 +176,11 @@ func TestAuthorizePostGoodLoginRedirectsWithCode(t *testing.T) {
 
 func TestAuthorizePostBadLoginRerendersForm(t *testing.T) {
 	a := newAuthorizeForTest(t)
-	form := url.Values{
-		"client_id": {"atlas"}, "redirect_uri": {"https://a/cb"}, "response_type": {"code"},
-		"code_challenge": {"abc123"}, "code_challenge_method": {"S256"},
-		"username": {"u-good"}, "password": {"WRONG"},
-	}
-	req := httptest.NewRequest("POST", "/authorize", strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	rec := httptest.NewRecorder()
-	a.ServeHTTP(rec, req)
+	cookie, token := getLoginForm(t, a)
+	form := validLoginForm()
+	form.Set("password", "WRONG")
+	form.Set("csrf_token", token)
+	rec := postAuthorize(a, form, cookie)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("want 200 re-render on bad login, got %d", rec.Code)
 	}
@@ -124,6 +189,56 @@ func TestAuthorizePostBadLoginRerendersForm(t *testing.T) {
 	}
 	if loc := rec.Header().Get("Location"); loc != "" {
 		t.Error("must not redirect on bad login")
+	}
+	// The re-rendered form must carry a FRESH double-submit pair so the retry
+	// can succeed (the spent token was rotated).
+	var fresh *http.Cookie
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == csrfCookieName && c.MaxAge > 0 {
+			fresh = c
+		}
+	}
+	if fresh == nil || fresh.Value == "" || fresh.Value == token {
+		t.Fatalf("bad login must rotate the CSRF cookie, got %+v", fresh)
+	}
+	m := csrfFieldRE.FindStringSubmatch(rec.Body.String())
+	if m == nil || m[1] != fresh.Value {
+		t.Fatalf("re-rendered form field does not match rotated cookie: %v vs %q", m, fresh.Value)
+	}
+}
+
+func TestAuthorizePostMissingCSRFCookieForbidden(t *testing.T) {
+	a := newAuthorizeForTest(t)
+	_, token := getLoginForm(t, a)
+	form := validLoginForm()
+	form.Set("csrf_token", token)
+	rec := postAuthorize(a, form, nil) // field present, cookie absent
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("missing CSRF cookie: want 403, got %d", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); loc != "" {
+		t.Errorf("CSRF failure must not redirect, got Location %s", loc)
+	}
+}
+
+func TestAuthorizePostCSRFMismatchForbidden(t *testing.T) {
+	a := newAuthorizeForTest(t)
+	cookie, _ := getLoginForm(t, a)
+	for name, field := range map[string]string{
+		"mismatched field": "not-the-cookie-value",
+		"missing field":    "",
+	} {
+		form := validLoginForm()
+		if field != "" {
+			form.Set("csrf_token", field)
+		}
+		rec := postAuthorize(a, form, cookie)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("%s: want 403, got %d body %s", name, rec.Code, rec.Body.String())
+		}
+		if loc := rec.Header().Get("Location"); loc != "" {
+			t.Errorf("%s: CSRF failure must not redirect, got Location %s", name, loc)
+		}
 	}
 }
 

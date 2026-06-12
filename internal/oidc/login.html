@@ -22,7 +22,8 @@
 </style>
 </head>
 <body>
-<form method="post" action="/authorize">
+<!-- action="" posts back to the current URL — survives path-prefix proxies -->
+<form method="post" action="">
   <h1>herald</h1>
   <p class="sub">sign in to continue to {{.ClientID}}</p>
   {{if .Error}}<div class="err">{{.Error}}</div>{{end}}
@@ -36,6 +37,7 @@
   <input type="hidden" name="state" value="{{.State}}">
   <input type="hidden" name="code_challenge" value="{{.CodeChallenge}}">
   <input type="hidden" name="code_challenge_method" value="S256">
+  <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
   <button type="submit">sign in</button>
 </form>
 </body>
