@@ -75,6 +75,7 @@ func main() {
 		oidc.NewAgentGrant(provider, idsvc, refresh),
 		oidc.NewHumanGrant(provider, idsvc, refresh),
 		oidc.NewRefreshGrant(provider, idsvc, refresh),
+		nil, // authorization_code: wired in A5 alongside /authorize
 		oidc.NewFederatedGrant(provider, idsvc, st, issuerRegistry, refresh),
 	))
 	provider.SetRevokeHandler(oidc.NewRevokeHandler(refresh))

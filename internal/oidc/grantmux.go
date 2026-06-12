@@ -8,12 +8,14 @@ type GrantMux struct {
 	agent     TokenHandler
 	human     TokenHandler
 	refresh   TokenHandler
+	code      TokenHandler
 	federated TokenHandler
 }
 
-// NewGrantMux wires the dispatcher. All args implement TokenHandler.
-func NewGrantMux(agent, human, refresh TokenHandler, federated ...TokenHandler) *GrantMux {
-	m := &GrantMux{agent: agent, human: human, refresh: refresh}
+// NewGrantMux wires the dispatcher. All args implement TokenHandler; code may
+// be nil where the authorization-code flow isn't wired.
+func NewGrantMux(agent, human, refresh, code TokenHandler, federated ...TokenHandler) *GrantMux {
+	m := &GrantMux{agent: agent, human: human, refresh: refresh, code: code}
 	if len(federated) > 0 {
 		m.federated = federated[0]
 	}
@@ -34,6 +36,12 @@ func (m *GrantMux) ServeToken(w http.ResponseWriter, r *http.Request) {
 		m.human.ServeToken(w, r)
 	case refreshTokenGrant:
 		m.refresh.ServeToken(w, r)
+	case authorizationCodeGrant:
+		if m.code != nil {
+			m.code.ServeToken(w, r)
+			return
+		}
+		oauthError(w, http.StatusBadRequest, "unsupported_grant_type", "grant_type not supported")
 	case federatedGrant:
 		if m.federated != nil {
 			m.federated.ServeToken(w, r)
