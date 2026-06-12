@@ -77,7 +77,7 @@ func (g *CodeGrant) ServeToken(w http.ResponseWriter, r *http.Request) {
 		// Refresh is best-effort, same posture as HumanGrant: a failure still
 		// returns a usable access token, but log it.
 		if rtok, err := g.refresh.Issue(r.Context(), u.ID); err != nil {
-			log.Printf("oidc: refresh.Issue for human %s: %v", u.ID, err)
+			log.Printf("oidc: refresh.Issue for authorization_code user %s: %v", u.ID, err)
 		} else {
 			resp["refresh_token"] = rtok
 		}
