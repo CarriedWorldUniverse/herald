@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>herald — sign in</title>
+<style>
+  body { background:#14161a; color:#e8e6e3; font:16px/1.5 system-ui, sans-serif;
+         display:grid; place-items:center; min-height:100vh; margin:0; }
+  form { background:#1c1f26; border:1px solid #2a2e37; border-radius:10px;
+         padding:2rem 2.5rem; width:20rem; }
+  h1 { font-size:1.1rem; margin:0 0 .25rem; }
+  p.sub { color:#8a8f98; font-size:.85rem; margin:0 0 1.25rem; }
+  label { display:block; font-size:.8rem; color:#8a8f98; margin:.75rem 0 .25rem; }
+  input[type=text], input[type=password] {
+    width:100%; box-sizing:border-box; background:#14161a; color:#e8e6e3;
+    border:1px solid #2a2e37; border-radius:6px; padding:.5rem .6rem; font-size:1rem; }
+  button { margin-top:1.25rem; width:100%; padding:.55rem; border:0; border-radius:6px;
+           background:#4a7dcf; color:#fff; font-size:1rem; cursor:pointer; }
+  .err { background:#3a2026; border:1px solid #5c2e36; color:#e8b4bc;
+         border-radius:6px; padding:.5rem .6rem; font-size:.85rem; margin-bottom:.5rem; }
+</style>
+</head>
+<body>
+<!-- action="" posts back to the current URL — survives path-prefix proxies -->
+<form method="post" action="">
+  <h1>herald</h1>
+  <p class="sub">sign in to continue to {{.ClientID}}</p>
+  {{if .Error}}<div class="err">{{.Error}}</div>{{end}}
+  <label for="username">user id</label>
+  <input type="text" id="username" name="username" autocomplete="username" autofocus required>
+  <label for="password">password</label>
+  <input type="password" id="password" name="password" autocomplete="current-password" required>
+  <input type="hidden" name="client_id" value="{{.ClientID}}">
+  <input type="hidden" name="redirect_uri" value="{{.RedirectURI}}">
+  <input type="hidden" name="response_type" value="code">
+  <input type="hidden" name="state" value="{{.State}}">
+  <input type="hidden" name="code_challenge" value="{{.CodeChallenge}}">
+  <input type="hidden" name="code_challenge_method" value="S256">
+  <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+  <button type="submit">sign in</button>
+</form>
+</body>
+</html>

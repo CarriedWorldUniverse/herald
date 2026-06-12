@@ -100,6 +100,7 @@ func TestRefreshGrant_EndToEnd(t *testing.T) {
 		NewAgentGrant(p, svc, refresh),
 		NewHumanGrant(p, svc, refresh),
 		NewRefreshGrant(p, svc, refresh),
+		nil,
 	))
 	srv := httptest.NewServer(p.Handler())
 	t.Cleanup(srv.Close)
@@ -157,7 +158,7 @@ func TestRevokeEndpoint(t *testing.T) {
 	_, signKey, _ := ed25519.GenerateKey(nil)
 	p, _ := NewProvider(Config{Issuer: "http://h/", SigningKey: signKey})
 	refresh := NewRefreshIssuer(p, st, 0)
-	p.SetTokenHandler(NewGrantMux(NewAgentGrant(p, svc, refresh), NewHumanGrant(p, svc, refresh), NewRefreshGrant(p, svc, refresh)))
+	p.SetTokenHandler(NewGrantMux(NewAgentGrant(p, svc, refresh), NewHumanGrant(p, svc, refresh), NewRefreshGrant(p, svc, refresh), nil))
 	p.SetRevokeHandler(NewRevokeHandler(refresh))
 	srv := httptest.NewServer(p.Handler())
 	t.Cleanup(srv.Close)

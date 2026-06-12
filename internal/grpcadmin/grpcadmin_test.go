@@ -310,6 +310,7 @@ func TestAdminFederatedIdentitySetupIssuesFederatedGrantToken(t *testing.T) {
 		heraldoidc.NewAgentGrant(p, id, nil),
 		heraldoidc.NewHumanGrant(p, id, nil),
 		heraldoidc.NewRefreshGrant(p, id, nil),
+		nil,
 		heraldoidc.NewFederatedGrant(p, id, st, reg, nil),
 	))
 	srv := httptest.NewServer(p.Handler())

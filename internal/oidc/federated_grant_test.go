@@ -28,6 +28,7 @@ func federatedStack(t *testing.T) (*herald.Provider, *identity.Service, store.St
 		herald.NewAgentGrant(p, svc, nil),
 		herald.NewHumanGrant(p, svc, nil),
 		herald.NewRefreshGrant(p, svc, nil),
+		nil,
 		herald.NewFederatedGrant(p, svc, s, reg, nil),
 	))
 	srv := httptest.NewServer(p.Handler())

@@ -47,8 +47,9 @@ type Provider struct {
 	ttl      time.Duration
 	signer   jose.Signer
 	now      func() time.Time
-	tokenEP  TokenHandler // optional; set by the agent-grant task
-	revokeEP http.Handler // optional; POST /revoke
+	tokenEP     TokenHandler // optional; set by the agent-grant task
+	revokeEP    http.Handler // optional; POST /revoke
+	authorizeEP http.Handler // optional; GET/POST /authorize (auth-code flow)
 }
 
 // TokenHandler handles POST /token. Wired by the agent-grant task; nil yields
@@ -95,6 +96,9 @@ func (p *Provider) SetTokenHandler(h TokenHandler) { p.tokenEP = h }
 
 // SetRevokeHandler wires POST /revoke (refresh-token revocation).
 func (p *Provider) SetRevokeHandler(h http.Handler) { p.revokeEP = h }
+
+// SetAuthorizeHandler wires GET/POST /authorize (the auth-code flow task).
+func (p *Provider) SetAuthorizeHandler(h http.Handler) { p.authorizeEP = h }
 
 // Issuer returns the configured issuer URL.
 func (p *Provider) Issuer() string { return p.issuer }
@@ -181,6 +185,13 @@ func (p *Provider) Handler() http.Handler {
 	mux.HandleFunc("GET /jwks", p.handleJWKS)
 	mux.HandleFunc("POST /token", p.handleToken)
 	mux.HandleFunc("POST /revoke", p.handleRevoke)
+	mux.HandleFunc("/authorize", func(w http.ResponseWriter, r *http.Request) {
+		if p.authorizeEP == nil {
+			http.Error(w, "authorization endpoint not configured", http.StatusNotImplemented)
+			return
+		}
+		p.authorizeEP.ServeHTTP(w, r)
+	})
 	return mux
 }
 
@@ -194,11 +205,14 @@ func (p *Provider) handleDiscovery(w http.ResponseWriter, _ *http.Request) {
 		"issuer":                                p.issuer,
 		"jwks_uri":                              base + "/jwks",
 		"token_endpoint":                        p.TokenURL(),
-		"grant_types_supported":                 []string{"urn:ietf:params:oauth:grant-type:jwt-bearer", "password", "refresh_token"},
+		"authorization_endpoint":                base + "/authorize",
+		"grant_types_supported":                 []string{"urn:ietf:params:oauth:grant-type:jwt-bearer", "password", "refresh_token", "authorization_code"},
 		"revocation_endpoint":                   base + "/revoke",
 		"id_token_signing_alg_values_supported": []string{"EdDSA"},
-		"token_endpoint_auth_methods_supported": []string{"private_key_jwt"},
-		"response_types_supported":              []string{"token"},
+		"token_endpoint_auth_methods_supported": []string{"private_key_jwt", "none"}, // "none": public clients (PKCE) don't authenticate at /token
+		"response_types_supported":              []string{"code"},
+		"code_challenge_methods_supported":      []string{"S256"},
+		"subject_types_supported":               []string{"public"},
 	})
 }
 
