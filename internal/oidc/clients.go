@@ -22,8 +22,11 @@ type ClientRegistry struct {
 }
 
 // ParseClients parses "id|redirectURI[,id|redirectURI...]" into a registry.
-// Redirect URIs must be https, except localhost (dev). Empty input is a valid
-// empty registry (the authorize endpoint then rejects everything).
+// Entries are comma-separated, so redirect URIs must not contain literal
+// commas — URL-encode as %2C if needed. Redirect URIs must be https, except
+// loopback hosts (localhost, 127.0.0.1, ::1) which are allowed over http for
+// local development (RFC 8252 §8.3). Empty input is a valid empty registry
+// (the authorize endpoint then rejects everything).
 func ParseClients(s string) (*ClientRegistry, error) {
 	r := &ClientRegistry{clients: map[string]Client{}}
 	if strings.TrimSpace(s) == "" {
@@ -38,8 +41,10 @@ func ParseClients(s string) (*ClientRegistry, error) {
 		if err != nil {
 			return nil, fmt.Errorf("oidc: client %s: bad redirect %q: %w", id, redirect, err)
 		}
-		if u.Scheme != "https" && u.Hostname() != "localhost" {
-			return nil, fmt.Errorf("oidc: client %s: redirect must be https (or localhost for dev), got %q", id, redirect)
+		h := u.Hostname()
+		isLoopback := h == "localhost" || h == "127.0.0.1" || h == "::1"
+		if u.Scheme != "https" && !isLoopback {
+			return nil, fmt.Errorf("oidc: client %s: redirect must be https (or loopback for dev), got %q", id, redirect)
 		}
 		r.clients[id] = Client{ID: id, RedirectURI: redirect}
 	}

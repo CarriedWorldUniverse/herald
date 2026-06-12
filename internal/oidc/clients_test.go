@@ -21,6 +21,9 @@ func TestParseClients(t *testing.T) {
 			}
 		}},
 		{name: "two clients", in: "atlas|https://a/cb,other|https://b/cb", check: func(t *testing.T, r *ClientRegistry) {
+			if _, ok := r.Lookup("atlas"); !ok {
+				t.Fatal("missing first client")
+			}
 			if _, ok := r.Lookup("other"); !ok {
 				t.Fatal("missing second client")
 			}
@@ -30,6 +33,16 @@ func TestParseClients(t *testing.T) {
 		{name: "localhost http allowed for dev", in: "dev|http://localhost:8443/cb", check: func(t *testing.T, r *ClientRegistry) {
 			if _, ok := r.Lookup("dev"); !ok {
 				t.Fatal("localhost http should be allowed")
+			}
+		}},
+		{name: "127.0.0.1 http allowed for dev", in: "dev|http://127.0.0.1:8443/cb", check: func(t *testing.T, r *ClientRegistry) {
+			if _, ok := r.Lookup("dev"); !ok {
+				t.Fatal("127.0.0.1 http should be allowed (RFC 8252 §8.3)")
+			}
+		}},
+		{name: "::1 http allowed for dev", in: "dev|http://[::1]:8443/cb", check: func(t *testing.T, r *ClientRegistry) {
+			if _, ok := r.Lookup("dev"); !ok {
+				t.Fatal("::1 http should be allowed (RFC 8252 §8.3)")
 			}
 		}},
 	}
