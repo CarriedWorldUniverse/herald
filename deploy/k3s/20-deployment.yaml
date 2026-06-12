@@ -19,8 +19,8 @@ spec:
     spec:
       containers:
         - name: herald
-          image: localhost/herald:dev
-          imagePullPolicy: Never
+          image: ghcr.io/carriedworlduniverse/herald:main
+          imagePullPolicy: Always
           ports:
             - name: http
               containerPort: 8099
