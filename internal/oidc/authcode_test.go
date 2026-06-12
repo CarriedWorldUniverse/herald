@@ -3,6 +3,7 @@ package oidc
 import (
 	"crypto/sha256"
 	"encoding/base64"
+	"sync"
 	"testing"
 	"time"
 )
@@ -33,6 +34,32 @@ func TestCodeStoreExpiry(t *testing.T) {
 	}
 }
 
+func TestCodeStoreSingleUseConcurrent(t *testing.T) {
+	cs := NewCodeStore(nil)
+	code := cs.Issue(PendingAuth{UserID: "u1", CodeChallenge: "ch"})
+	const n = 20
+	results := make([]bool, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, ok := cs.Redeem(code)
+			results[i] = ok
+		}(i)
+	}
+	wg.Wait()
+	successes := 0
+	for _, ok := range results {
+		if ok {
+			successes++
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("expected exactly 1 successful redeem, got %d", successes)
+	}
+}
+
 func TestVerifyPKCE(t *testing.T) {
 	verifier := "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
 	sum := sha256.Sum256([]byte(verifier))
@@ -45,5 +72,8 @@ func TestVerifyPKCE(t *testing.T) {
 	}
 	if VerifyPKCE("", "anything") {
 		t.Fatal("empty challenge must never verify")
+	}
+	if VerifyPKCE("somechallenge", "") {
+		t.Fatal("empty verifier must never verify")
 	}
 }

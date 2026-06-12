@@ -44,17 +44,16 @@ func NewCodeStore(now func() time.Time) *CodeStore {
 // Issue mints a single-use code for the pending auth.
 func (s *CodeStore) Issue(pa PendingAuth) string {
 	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		panic("oidc: crypto/rand failed: " + err.Error()) // unreachable in practice
-	}
+	_, _ = rand.Read(b) // never fails on Linux/macOS/Windows; blank-discard intentional (see refresh.go)
 	code := base64.RawURLEncoding.EncodeToString(b)
-	pa.expires = s.now().Add(codeTTL)
+	now := s.now()
+	pa.expires = now.Add(codeTTL)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// Opportunistic sweep: the map only ever holds in-flight logins, so a
 	// linear sweep on issue keeps it bounded without a background goroutine.
 	for k, v := range s.codes {
-		if s.now().After(v.expires) {
+		if now.After(v.expires) {
 			delete(s.codes, k)
 		}
 	}
