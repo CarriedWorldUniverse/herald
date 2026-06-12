@@ -3,6 +3,7 @@ package oidc
 import (
 	_ "embed"
 	"html/template"
+	"log"
 	"net/http"
 	"net/url"
 )
@@ -74,7 +75,7 @@ func (a *Authorize) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		u, err := a.humans.VerifyHumanPassword(r.Context(), r.Form.Get("username"), r.Form.Get("password"))
 		if err != nil {
 			p.Error = "login failed — check your user id and password"
-			a.render(w, http.StatusUnauthorized, p)
+			a.render(w, http.StatusOK, p)
 			return
 		}
 		code := a.codes.Issue(PendingAuth{
@@ -98,5 +99,7 @@ func (a *Authorize) render(w http.ResponseWriter, status int, p loginPage) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
-	_ = loginTmpl.Execute(w, p)
+	if err := loginTmpl.Execute(w, p); err != nil {
+		log.Printf("oidc: authorize: template execute: %v", err)
+	}
 }

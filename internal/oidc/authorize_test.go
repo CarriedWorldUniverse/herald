@@ -116,13 +116,41 @@ func TestAuthorizePostBadLoginRerendersForm(t *testing.T) {
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rec := httptest.NewRecorder()
 	a.ServeHTTP(rec, req)
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("want 401 re-render, got %d", rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200 re-render on bad login, got %d", rec.Code)
 	}
 	if !strings.Contains(rec.Body.String(), "login failed") {
 		t.Error("error message missing from re-rendered form")
 	}
 	if loc := rec.Header().Get("Location"); loc != "" {
 		t.Error("must not redirect on bad login")
+	}
+}
+
+func TestAuthorizePostRejectsBadClientWithoutRedirect(t *testing.T) {
+	a := newAuthorizeForTest(t)
+	// Same five invalid param sets as the GET variant — no-redirect invariant
+	// must hold when validation failure arrives via POST body.
+	for _, q := range []string{
+		"client_id=ghost&redirect_uri=https%3A%2F%2Fa%2Fcb&response_type=code&code_challenge=c&code_challenge_method=S256",
+		"client_id=atlas&redirect_uri=https%3A%2F%2Fevil%2Fcb&response_type=code&code_challenge=c&code_challenge_method=S256",
+		"client_id=atlas&redirect_uri=https%3A%2F%2Fa%2Fcb&response_type=token&code_challenge=c&code_challenge_method=S256",
+		"client_id=atlas&redirect_uri=https%3A%2F%2Fa%2Fcb&response_type=code",
+		"client_id=atlas&redirect_uri=https%3A%2F%2Fa%2Fcb&response_type=code&code_challenge=c&code_challenge_method=plain",
+	} {
+		vals, err := url.ParseQuery(q)
+		if err != nil {
+			t.Fatalf("bad query string %q: %v", q, err)
+		}
+		req := httptest.NewRequest("POST", "/authorize", strings.NewReader(vals.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rec := httptest.NewRecorder()
+		a.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("query %q: want 400, got %d", q, rec.Code)
+		}
+		if loc := rec.Header().Get("Location"); loc != "" {
+			t.Errorf("query %q: must not redirect on validation failure, got Location %s", q, loc)
+		}
 	}
 }
