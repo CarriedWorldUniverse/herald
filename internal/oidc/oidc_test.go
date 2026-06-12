@@ -85,6 +85,85 @@ func TestProvider_Discovery(t *testing.T) {
 	if !found {
 		t.Fatalf("EdDSA not advertised: %+v", d["id_token_signing_alg_values_supported"])
 	}
+
+	// Authorization-code flow (A5): the discovery doc must advertise the
+	// /authorize endpoint, PKCE S256, the code response type (there is no
+	// implicit flow — "token" was never backed by a handler), and the
+	// authorization_code grant.
+	if d["authorization_endpoint"] != "https://herald.test/authorize" {
+		t.Fatalf("authorization_endpoint = %v", d["authorization_endpoint"])
+	}
+	if got := anyStrings(d["code_challenge_methods_supported"]); len(got) != 1 || got[0] != "S256" {
+		t.Fatalf("code_challenge_methods_supported = %v", d["code_challenge_methods_supported"])
+	}
+	if got := anyStrings(d["response_types_supported"]); len(got) != 1 || got[0] != "code" {
+		t.Fatalf("response_types_supported = %v (want exactly [code])", d["response_types_supported"])
+	}
+	grants := anyStrings(d["grant_types_supported"])
+	if !containsString(grants, "authorization_code") {
+		t.Fatalf("authorization_code not in grant_types_supported: %v", grants)
+	}
+	if !containsString(grants, "urn:ietf:params:oauth:grant-type:jwt-bearer") {
+		t.Fatalf("jwt-bearer dropped from grant_types_supported: %v", grants)
+	}
+}
+
+// anyStrings converts a decoded-JSON []any into []string.
+func anyStrings(v any) []string {
+	arr, _ := v.([]any)
+	out := make([]string, 0, len(arr))
+	for _, a := range arr {
+		if s, ok := a.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func containsString(ss []string, want string) bool {
+	for _, s := range ss {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestProvider_AuthorizeRouting(t *testing.T) {
+	p := newTestProvider(t)
+	srv := httptest.NewServer(p.Handler())
+	defer srv.Close()
+
+	// Unconfigured: 501.
+	resp, err := http.Get(srv.URL + "/authorize")
+	if err != nil {
+		t.Fatalf("GET /authorize: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotImplemented {
+		t.Fatalf("unconfigured /authorize status = %d, want 501", resp.StatusCode)
+	}
+
+	// Configured: both GET and POST reach the handler.
+	var gotMethods []string
+	p.SetAuthorizeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethods = append(gotMethods, r.Method)
+		w.WriteHeader(http.StatusTeapot)
+	}))
+	for _, method := range []string{http.MethodGet, http.MethodPost} {
+		req, _ := http.NewRequest(method, srv.URL+"/authorize", nil)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("%s /authorize: %v", method, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusTeapot {
+			t.Fatalf("%s /authorize status = %d, want stub's 418", method, resp.StatusCode)
+		}
+	}
+	if len(gotMethods) != 2 || gotMethods[0] != "GET" || gotMethods[1] != "POST" {
+		t.Fatalf("stub saw methods %v, want [GET POST]", gotMethods)
+	}
 }
 
 func TestProvider_SignAndVerifyRoundTrip(t *testing.T) {

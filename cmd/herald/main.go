@@ -11,6 +11,9 @@
 //	HERALD_DB           sqlite path (default /var/lib/nexus/herald.db; ":memory:" ok)
 //	HERALD_ISSUER       OIDC issuer URL (default http://<addr>/) — set to the
 //	                    externally-reachable https URL in production
+//	HERALD_OIDC_CLIENTS registered OAuth2 clients for the authorization-code
+//	                    flow, "id|redirectURI[,id|redirectURI...]" (empty =
+//	                    no clients; /authorize rejects everything)
 //	HERALD_REFRESH_TTL  refresh-token lifetime (Go duration, e.g. "720h"; default 30d)
 //	HERALD_SIGNING_KEY  base64(std) Ed25519 private key (64 bytes). If unset, a
 //	                    key is generated on boot and its public JWKS logged —
@@ -71,14 +74,20 @@ func main() {
 	refreshTTL := envDuration("HERALD_REFRESH_TTL", 0) // 0 -> issuer default (30d)
 	refresh := oidc.NewRefreshIssuer(provider, st, refreshTTL)
 	issuerRegistry := buildIssuerRegistry(provider.TokenURL())
+	oidcClients, err := oidc.ParseClients(os.Getenv("HERALD_OIDC_CLIENTS"))
+	if err != nil {
+		log.Fatalf("herald: HERALD_OIDC_CLIENTS: %v", err)
+	}
+	codes := oidc.NewCodeStore(nil)
 	provider.SetTokenHandler(oidc.NewGrantMux(
 		oidc.NewAgentGrant(provider, idsvc, refresh),
 		oidc.NewHumanGrant(provider, idsvc, refresh),
 		oidc.NewRefreshGrant(provider, idsvc, refresh),
-		nil, // authorization_code: wired in A5 alongside /authorize
+		oidc.NewCodeGrant(provider, idsvc, codes, refresh),
 		oidc.NewFederatedGrant(provider, idsvc, st, issuerRegistry, refresh),
 	))
 	provider.SetRevokeHandler(oidc.NewRevokeHandler(refresh))
+	provider.SetAuthorizeHandler(oidc.NewAuthorize(oidcClients, codes, idsvc))
 
 	gatewayBase := os.Getenv("HERALD_GATEWAY_URL")
 	if gatewayBase == "" {
@@ -93,9 +102,10 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"ok","service":"herald"}`))
 	})
-	// OIDC endpoints: discovery, JWKS, token, revoke.
+	// OIDC endpoints: discovery, JWKS, authorize, token, revoke.
 	mux.Handle("/.well-known/", provider.Handler())
 	mux.Handle("/jwks", provider.Handler())
+	mux.Handle("/authorize", provider.Handler())
 	mux.Handle("/token", provider.Handler())
 	mux.Handle("/revoke", provider.Handler())
 	// Token-authed provisioning (self-provision, validate) + the in-cluster
