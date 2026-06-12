@@ -91,7 +91,15 @@ func (a *Authorize) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid authorization request: "+msg, http.StatusBadRequest)
 			return
 		}
-		p.CSRFToken = issueCSRF(w)
+		// Idempotent CSRF issue: duplicate GETs (browser prerender, a second
+		// tab) must not overwrite the cookie an earlier-rendered form is
+		// still paired with, or that form's submit fails the double-submit
+		// check. Reuse the inbound token; only mint when absent.
+		if c, err := r.Cookie(csrfCookieName); err == nil && c.Value != "" {
+			p.CSRFToken = c.Value
+		} else {
+			p.CSRFToken = issueCSRF(w)
+		}
 		a.render(w, http.StatusOK, p)
 	case http.MethodPost:
 		if err := r.ParseForm(); err != nil {

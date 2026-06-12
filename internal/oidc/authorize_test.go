@@ -118,6 +118,44 @@ func TestAuthorizeGetRendersForm(t *testing.T) {
 	}
 }
 
+// TestAuthorizeGetReusesExistingCSRFCookie pins GET idempotence: a duplicate
+// GET (browser prerender, second tab) that already carries the CSRF cookie
+// must NOT overwrite it — otherwise the earlier-rendered form still embeds
+// the old token and its submit fails the double-submit check.
+func TestAuthorizeGetReusesExistingCSRFCookie(t *testing.T) {
+	a := newAuthorizeForTest(t)
+	cookie, _ := getLoginForm(t, a)
+
+	req := httptest.NewRequest("GET", "/authorize?"+authzQuery, nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	a.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second GET status %d body %s", rec.Code, rec.Body.String())
+	}
+	if sc := rec.Header().Values("Set-Cookie"); len(sc) != 0 {
+		t.Errorf("second GET with CSRF cookie must not set a cookie, got %v", sc)
+	}
+	m := csrfFieldRE.FindStringSubmatch(rec.Body.String())
+	if m == nil {
+		t.Fatal("csrf_token hidden field missing from login form")
+	}
+	if m[1] != cookie.Value {
+		t.Errorf("form field %q must reuse inbound cookie value %q", m[1], cookie.Value)
+	}
+}
+
+// TestAuthorizeGetMintsFreshTokenWithoutCookie pins the mint path: cookieless
+// GETs each get their own token (no cross-request reuse without a cookie).
+func TestAuthorizeGetMintsFreshTokenWithoutCookie(t *testing.T) {
+	a := newAuthorizeForTest(t)
+	c1, t1 := getLoginForm(t, a)
+	c2, t2 := getLoginForm(t, a)
+	if t1 == t2 || c1.Value == c2.Value {
+		t.Errorf("cookieless GETs must mint distinct tokens, both got %q", t1)
+	}
+}
+
 func TestAuthorizeGetRejectsBadClientWithoutRedirect(t *testing.T) {
 	a := newAuthorizeForTest(t)
 	for _, q := range []string{
