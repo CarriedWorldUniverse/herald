@@ -285,13 +285,20 @@ func (a *adminServer) Me(ctx context.Context, _ *heraldv1.MeRequest) (*heraldv1.
 }
 
 // grantAll grants each scope to userID on behalf of grantedBy (an FK-valid user
-// id — the verified caller).
+// id — the verified caller). "role:<name>" entries expand to their bundle scopes
+// first, so onboarding can grant e.g. role:org-owner. A grant the tenant
+// invariant refuses (a control-plane scope to a non-admin org) is a
+// PermissionDenied; an unknown role is InvalidArgument.
 func (a *adminServer) grantAll(ctx context.Context, userID string, scopes []string, grantedBy string) error {
-	for _, sc := range scopes {
-		if sc == "" {
-			continue
-		}
+	expanded, err := identity.ExpandScopes(scopes)
+	if err != nil {
+		return status.Error(codes.InvalidArgument, err.Error())
+	}
+	for _, sc := range expanded {
 		if err := a.s.id.GrantScope(ctx, userID, sc, grantedBy); err != nil {
+			if errors.Is(err, identity.ErrControlPlaneScopeForTenant) {
+				return status.Error(codes.PermissionDenied, err.Error())
+			}
 			return status.Error(codes.Internal, "grant scope: "+err.Error())
 		}
 	}

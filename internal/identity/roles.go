@@ -1,5 +1,10 @@
 package identity
 
+import (
+	"fmt"
+	"strings"
+)
+
 // Roles and the canonical scope vocabulary. This is herald's policy surface:
 // a role is a named bundle of scopes assigned as a unit during onboarding and
 // in the console; raw GrantScope remains available for one-off capabilities
@@ -101,4 +106,39 @@ func ScopesForRole(r Role) ([]string, bool) {
 	out := make([]string, len(s))
 	copy(out, s)
 	return out, true
+}
+
+// RolePrefix marks a grant entry as a role to expand rather than a raw scope.
+// Callers (onboarding, the console) pass "role:org-owner"; ExpandScopes turns it
+// into the bundle's scopes so the bundle stays authoritative here in herald.
+const RolePrefix = "role:"
+
+// ExpandScopes resolves a grant list: each "role:<name>" entry becomes that
+// role's scopes, plain scopes pass through, the result is de-duplicated in
+// first-seen order, and an unknown role is an error (onboarding fails loudly on
+// a typo). nil/empty in → empty out.
+func ExpandScopes(entries []string) ([]string, error) {
+	var out []string
+	seen := map[string]bool{}
+	add := func(s string) {
+		if s == "" || seen[s] {
+			return
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	for _, e := range entries {
+		if name, ok := strings.CutPrefix(e, RolePrefix); ok {
+			scopes, known := ScopesForRole(Role(name))
+			if !known {
+				return nil, fmt.Errorf("identity: unknown role %q", name)
+			}
+			for _, s := range scopes {
+				add(s)
+			}
+			continue
+		}
+		add(e)
+	}
+	return out, nil
 }

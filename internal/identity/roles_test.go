@@ -50,6 +50,43 @@ func TestRoleBundles_NoControlPlaneScope(t *testing.T) {
 	}
 }
 
+// ExpandScopes turns role:<name> entries into their bundle scopes, passes plain
+// scopes through, dedups, and fails on an unknown role.
+func TestExpandScopes(t *testing.T) {
+	owner, _ := identity.ScopesForRole(identity.RoleOrgOwner)
+
+	got, err := identity.ExpandScopes([]string{"role:org-owner", "knowledge:read"})
+	if err != nil {
+		t.Fatalf("expand: %v", err)
+	}
+	// Every org-owner scope is present, plus the plain one, with no duplicates
+	// (knowledge:read appears in the bundle AND was passed explicitly).
+	for _, s := range owner {
+		if !hasScope(got, s) {
+			t.Fatalf("expanded set missing bundle scope %q: %v", s, got)
+		}
+	}
+	if !hasScope(got, "knowledge:read") {
+		t.Fatalf("expanded set missing plain scope: %v", got)
+	}
+	seen := map[string]int{}
+	for _, s := range got {
+		seen[s]++
+		if seen[s] > 1 {
+			t.Fatalf("duplicate scope %q in %v", s, got)
+		}
+	}
+
+	if _, err := identity.ExpandScopes([]string{"role:does-not-exist"}); err == nil {
+		t.Fatal("expanding an unknown role must error")
+	}
+
+	// nil/empty in, empty out, no error.
+	if out, err := identity.ExpandScopes(nil); err != nil || len(out) != 0 {
+		t.Fatalf("ExpandScopes(nil) = %v, %v", out, err)
+	}
+}
+
 func hasScope(scopes []string, want string) bool {
 	for _, s := range scopes {
 		if s == want {
