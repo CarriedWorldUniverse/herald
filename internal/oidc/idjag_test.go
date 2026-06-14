@@ -200,7 +200,10 @@ func TestProvider_AgentAuth_ConformanceShape(t *testing.T) {
 	p := newTestProvider(t)
 	srv := httptest.NewServer(p.Handler())
 	defer srv.Close()
-	resp, _ := http.Get(srv.URL + "/.well-known/oauth-authorization-server")
+	resp, err := http.Get(srv.URL + "/.well-known/oauth-authorization-server")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
 	defer resp.Body.Close()
 	var d map[string]any
 	_ = json.NewDecoder(resp.Body).Decode(&d)
