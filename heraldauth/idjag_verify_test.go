@@ -86,6 +86,24 @@ func TestVerifier_DistinctJTI_BothAccepted(t *testing.T) {
 	}
 }
 
+func TestVerifier_ExposesAudience(t *testing.T) {
+	ctx := context.Background()
+	issuer, tok := liveHeraldWithClaims(t, map[string]any{
+		"sub": "agent:anvil", "aud": "ledger", "jti": "aud-expose-1",
+	})
+	v, _ := heraldauth.New(ctx, heraldauth.Config{Issuer: issuer})
+	id, err := v.Verify(ctx, tok)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if !id.HasAudience("ledger") {
+		t.Fatalf("expected ledger in Audience, got %v", id.Audience)
+	}
+	if id.HasAudience("cairn") {
+		t.Fatalf("must not report an audience the token lacks: %v", id.Audience)
+	}
+}
+
 func TestProtectedResourceHandler_PointsAtHerald(t *testing.T) {
 	h := heraldauth.ProtectedResourceHandler("ledger", "https://herald.test/")
 	srv := httptest.NewServer(h)
