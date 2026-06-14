@@ -25,10 +25,26 @@ import (
 // Service is herald's identity domain logic over a store.Store.
 type Service struct {
 	store store.Store
+	// adminOrgID is the control-plane (administration) org. It gates the tenant
+	// invariant: a control-plane scope may be granted ONLY to a principal in
+	// this org. Genesis publishes it at boot via SetAdminOrg; until then it is
+	// empty and GrantScope fails closed on every control-plane grant.
+	adminOrgID string
 }
 
 // New constructs a Service.
 func New(s store.Store) *Service { return &Service{store: s} }
+
+// SetAdminOrg records which org is the control plane (the admin org). Genesis
+// calls this at boot once the admin org is resolved/created, before any
+// platform-admin grant. Idempotent.
+func (svc *Service) SetAdminOrg(orgID string) { svc.adminOrgID = orgID }
+
+// ErrControlPlaneScopeForTenant is returned when a grant would give a
+// control-plane scope (e.g. platform-admin) to a principal that is not in the
+// admin org — the multi-tenant safety invariant. It is also returned when the
+// admin org is unknown (fail closed).
+var ErrControlPlaneScopeForTenant = errors.New("identity: control-plane scope may only be granted to an admin-org principal")
 
 // ErrInvalidCredentials is the single, uniform error every human-login failure
 // returns — unknown user, not a human, inactive, no password set, or wrong
@@ -188,8 +204,22 @@ func (svc *Service) GetAgentByFingerprint(ctx context.Context, fp string) (store
 	return svc.store.GetUserByCasketFingerprint(ctx, fp)
 }
 
-// GrantScope grants a capability to a user, recording the granter.
+// GrantScope grants a capability to a user, recording the granter. A
+// control-plane scope (see ControlPlaneScopes) is permitted ONLY when the target
+// principal lives in the admin org; granting one to a tenant-org principal — or
+// when the admin org is unknown — returns ErrControlPlaneScopeForTenant. This is
+// the single chokepoint for every grant path (gRPC, HTTP, genesis), so the
+// tenant invariant holds platform-wide.
 func (svc *Service) GrantScope(ctx context.Context, userID, scope, grantedBy string) error {
+	if IsControlPlaneScope(scope) {
+		u, err := svc.store.GetUser(ctx, userID)
+		if err != nil {
+			return fmt.Errorf("identity.GrantScope: target: %w", err)
+		}
+		if svc.adminOrgID == "" || u.OrgID != svc.adminOrgID {
+			return ErrControlPlaneScopeForTenant
+		}
+	}
 	_, err := svc.store.GrantScope(ctx, userID, scope, grantedBy)
 	return err
 }

@@ -45,7 +45,8 @@ func Seed(ctx context.Context, id Identity, cfg SeedConfig) (ownerID string, err
 			break
 		}
 	}
-	if adminOrgID == "" {
+	fresh := adminOrgID == ""
+	if fresh {
 		if cfg.OwnerPassword == "" {
 			return "", fmt.Errorf("genesis: admin org %q absent but no owner password supplied — set the genesis secret to seed", cfg.AdminOrgName)
 		}
@@ -53,7 +54,14 @@ func Seed(ctx context.Context, id Identity, cfg SeedConfig) (ownerID string, err
 		if err != nil {
 			return "", fmt.Errorf("genesis: create admin org: %w", err)
 		}
-		owner, err := id.CreateHuman(ctx, org.ID, cfg.OwnerDisplayName)
+		adminOrgID = org.ID
+	}
+	// Publish the control-plane org to the identity layer BEFORE any platform-
+	// admin grant — the tenant invariant refuses the grant until herald knows
+	// which org is the admin org. Runs every boot (re-resolved on restart).
+	id.SetAdminOrg(adminOrgID)
+	if fresh {
+		owner, err := id.CreateHuman(ctx, adminOrgID, cfg.OwnerDisplayName)
 		if err != nil {
 			return "", fmt.Errorf("genesis: create owner: %w", err)
 		}
@@ -65,7 +73,6 @@ func Seed(ctx context.Context, id Identity, cfg SeedConfig) (ownerID string, err
 		if err := id.SetHumanPassword(ctx, owner.ID, cfg.OwnerPassword); err != nil {
 			return "", fmt.Errorf("genesis: set owner password: %w", err)
 		}
-		adminOrgID = org.ID
 		ownerID = owner.ID
 	}
 	// Always: the admin org is control-plane-only — disable every product

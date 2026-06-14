@@ -49,6 +49,9 @@ type Identity interface {
 	DisableProduct(ctx context.Context, orgID, product string) error
 	ListOrgs(ctx context.Context) ([]store.Org, error)
 	DeleteOrg(ctx context.Context, id string) error
+	// SetAdminOrg publishes which org is the control plane, so the tenant
+	// invariant (no control-plane scope for non-admin orgs) can be enforced.
+	SetAdminOrg(orgID string)
 }
 
 // TokenSigner signs herald tokens (the DeleteOrg fan-out mints a purge token).
