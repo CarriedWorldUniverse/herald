@@ -34,6 +34,17 @@ type Identity struct {
 	Products         []string // CWB products enabled for the org
 	AgentFP          string   // casket fingerprint of the agent (if any)
 	HumanFP          string   // casket fingerprint of the responsible human (if any)
+	Audience         []string // ID-JAG audiences this token is scoped to (empty for general tokens)
+}
+
+// HasAudience reports whether the token is scoped to the given audience.
+func (id Identity) HasAudience(a string) bool {
+	for _, aud := range id.Audience {
+		if aud == a {
+			return true
+		}
+	}
+	return false
 }
 
 // HasScope reports whether the identity holds the given scope.
@@ -170,7 +181,28 @@ func (v *Verifier) Verify(ctx context.Context, token string) (Identity, error) {
 		id.Scopes = strings.Fields(c.Scope)
 	}
 	id.Products = c.Products
+	id.Audience = normalizeAud(c.Audience)
 	return id, nil
+}
+
+// normalizeAud flattens a JWT aud claim (string or []string) into a slice.
+func normalizeAud(aud any) []string {
+	switch a := aud.(type) {
+	case string:
+		if a == "" {
+			return nil
+		}
+		return []string{a}
+	case []any:
+		out := make([]string, 0, len(a))
+		for _, v := range a {
+			if s, _ := v.(string); s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return nil
 }
 
 func (v *Verifier) verifyAgainstKeys(jws *jose.JSONWebSignature) ([]byte, error) {
