@@ -79,13 +79,15 @@ func main() {
 		log.Fatalf("herald: HERALD_OIDC_CLIENTS: %v", err)
 	}
 	codes := oidc.NewCodeStore(nil)
+	agentGrant := oidc.NewAgentGrant(provider, idsvc, refresh)
 	provider.SetTokenHandler(oidc.NewGrantMux(
-		oidc.NewAgentGrant(provider, idsvc, refresh),
+		agentGrant,
 		oidc.NewHumanGrant(provider, idsvc, refresh),
 		oidc.NewRefreshGrant(provider, idsvc, refresh),
 		oidc.NewCodeGrant(provider, idsvc, codes, refresh),
 		oidc.NewFederatedGrant(provider, idsvc, st, issuerRegistry, refresh),
 	))
+	provider.SetIdentityHandler(http.HandlerFunc(agentGrant.ServeIdentity))
 	provider.SetRevokeHandler(oidc.NewRevokeHandler(refresh))
 	provider.SetAuthorizeHandler(oidc.NewAuthorize(oidcClients, codes, idsvc))
 

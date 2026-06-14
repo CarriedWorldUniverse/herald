@@ -3,6 +3,8 @@ package oidc
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +19,9 @@ import (
 
 // jwtBearerGrant is the RFC 7523 grant type agents use.
 const jwtBearerGrant = "urn:ietf:params:oauth:grant-type:jwt-bearer"
+
+// idJAGType is the auth.md / RFC 8693 identity-assertion grant token type.
+const idJAGType = "urn:ietf:params:oauth:token-type:id-jag"
 
 // IdentityResolver is the slice of the identity service the agent grant needs.
 // Kept as an interface so the grant is testable + decoupled from the concrete
@@ -34,15 +39,19 @@ type IdentityResolver interface {
 // short-lived access token whose claims (incl. act.sub = responsible human)
 // are stamped FROM THE RECORD — never from client input.
 type AgentGrant struct {
-	p       *Provider
-	id      IdentityResolver
-	refresh *RefreshIssuer
+	p        *Provider
+	id       IdentityResolver
+	refresh  *RefreshIssuer
+	idjagTTL time.Duration
 }
 
 // NewAgentGrant wires the grant to a provider + identity resolver.
 func NewAgentGrant(p *Provider, id IdentityResolver, refresh *RefreshIssuer) *AgentGrant {
-	return &AgentGrant{p: p, id: id, refresh: refresh}
+	return &AgentGrant{p: p, id: id, refresh: refresh, idjagTTL: 5 * time.Minute}
 }
+
+// SetIDJAGTTL overrides the lifetime of minted ID-JAGs (default 5m).
+func (g *AgentGrant) SetIDJAGTTL(d time.Duration) { g.idjagTTL = d }
 
 // ServeToken handles POST /token for the jwt-bearer grant.
 func (g *AgentGrant) ServeToken(w http.ResponseWriter, r *http.Request) {
@@ -83,29 +92,32 @@ func (g *AgentGrant) ServeToken(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// issue verifies the assertion and returns a signed access token, or an error
-// (deliberately coarse — the handler maps any error to 401).
-func (g *AgentGrant) issue(ctx context.Context, assertion, tokenURL string) (token, subject string, err error) {
+// verifyAssertion validates an agent's casket-signed jwt-bearer assertion
+// against the registered key + block cascade and returns the agent record.
+// wantAud is the canonical endpoint URL the assertion's `aud` must match
+// (issuer+"/token" for the token endpoint, issuer+"/agent/identity" for the
+// identity endpoint) — never r.Host, so it is proxy-safe.
+func (g *AgentGrant) verifyAssertion(ctx context.Context, assertion, wantAud string) (store.User, error) {
 	// 1. Parse the assertion WITHOUT trusting it (no key yet) to read `sub`.
 	jws, err := jose.ParseSigned(assertion, []jose.SignatureAlgorithm{jose.EdDSA})
 	if err != nil {
-		return "", "", fmt.Errorf("parse assertion: %w", err)
+		return store.User{}, fmt.Errorf("parse assertion: %w", err)
 	}
 	var unverified assertionClaims
 	if err := json.Unmarshal(jws.UnsafePayloadWithoutVerification(), &unverified); err != nil {
-		return "", "", fmt.Errorf("assertion claims: %w", err)
+		return store.User{}, fmt.Errorf("assertion claims: %w", err)
 	}
 	if unverified.Subject == "" || unverified.Issuer != unverified.Subject {
-		return "", "", errors.New("assertion iss must equal sub (the agent id)")
+		return store.User{}, errors.New("assertion iss must equal sub (the agent id)")
 	}
 
 	// 2. Resolve the agent + its REGISTERED casket public key.
 	agent, err := g.id.GetUser(ctx, unverified.Subject)
 	if err != nil {
-		return "", "", fmt.Errorf("unknown agent: %w", err)
+		return store.User{}, fmt.Errorf("unknown agent: %w", err)
 	}
 	if agent.Kind != store.KindAgent || len(agent.CasketPubkey) != ed25519.PublicKeySize {
-		return "", "", errors.New("subject is not a key-registered agent")
+		return store.User{}, errors.New("subject is not a key-registered agent")
 	}
 
 	// 3. Verify the assertion signature against the registered key. This is the
@@ -113,29 +125,37 @@ func (g *AgentGrant) issue(ctx context.Context, assertion, tokenURL string) (tok
 	//    can produce a valid assertion.
 	verified, err := jws.Verify(ed25519.PublicKey(agent.CasketPubkey))
 	if err != nil {
-		return "", "", fmt.Errorf("assertion signature: %w", err)
+		return store.User{}, fmt.Errorf("assertion signature: %w", err)
 	}
 	var claims assertionClaims
 	if err := json.Unmarshal(verified, &claims); err != nil {
-		return "", "", fmt.Errorf("verified claims: %w", err)
+		return store.User{}, fmt.Errorf("verified claims: %w", err)
 	}
 
 	// 4. Validate audience + expiry of the assertion.
-	if !claims.audienceMatches(tokenURL) {
-		return "", "", errors.New("assertion audience mismatch")
+	if !claims.audienceMatches(wantAud) {
+		return store.User{}, errors.New("assertion audience mismatch")
 	}
 	if claims.Expiry == 0 || g.p.Now().After(time.Unix(claims.Expiry, 0)) {
-		return "", "", errors.New("assertion expired or missing exp")
+		return store.User{}, errors.New("assertion expired or missing exp")
 	}
 
 	// 5. Enforce the block cascade — agent must be active AND its responsible
 	//    human + org must be active (identity.IsActive evaluates this).
 	if !g.id.IsActive(ctx, agent.ID) {
-		return "", "", errors.New("agent inactive (blocked, or responsible human/org blocked)")
+		return store.User{}, errors.New("agent inactive (blocked, or responsible human/org blocked)")
 	}
+	return agent, nil
+}
 
-	// 6. Assemble the access token. act.sub, org, fingerprints come FROM THE
-	//    RECORD — client-supplied values in the assertion are ignored.
+// issue verifies the assertion and returns a signed general access token (the
+// jwt-bearer /token path). The handler maps any error to a uniform 401.
+func (g *AgentGrant) issue(ctx context.Context, assertion, tokenURL string) (token, subject string, err error) {
+	agent, err := g.verifyAssertion(ctx, assertion, tokenURL)
+	if err != nil {
+		return "", "", err
+	}
+	// Claims come FROM THE RECORD — client-supplied values are ignored.
 	out, err := accessClaims(ctx, g.id, agent)
 	if err != nil {
 		return "", "", fmt.Errorf("claims: %w", err)
@@ -145,6 +165,71 @@ func (g *AgentGrant) issue(ctx context.Context, assertion, tokenURL string) (tok
 		return "", "", err
 	}
 	return signed, agent.ID, nil
+}
+
+// randomJTI returns a 128-bit base64url replay nonce.
+func randomJTI() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b[:]), nil
+}
+
+// mintIDJAG builds an audience-scoped ID-JAG for the given agent. Claims come
+// FROM THE RECORD (sub/org/act.sub/scope/products via accessClaims) plus the
+// requested audience, a fresh jti, and client_id. Signed short-lived.
+func (g *AgentGrant) mintIDJAG(ctx context.Context, agent store.User, audience string) (string, error) {
+	out, err := accessClaims(ctx, g.id, agent)
+	if err != nil {
+		return "", fmt.Errorf("claims: %w", err)
+	}
+	jti, err := randomJTI()
+	if err != nil {
+		return "", fmt.Errorf("jti: %w", err)
+	}
+	out["aud"] = audience
+	out["jti"] = jti
+	out["client_id"] = agent.ID
+	return g.p.SignShortLived(out, g.idjagTTL)
+}
+
+// ServeIdentity handles POST /agent/identity — the auth.md identity endpoint.
+// For type=identity_assertion the agent presents a self-signed proof-of-
+// possession assertion (aud = this endpoint) plus the target service
+// `audience`; herald returns an audience-scoped ID-JAG.
+func (g *AgentGrant) ServeIdentity(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		oauthError(w, http.StatusBadRequest, "invalid_request", "unparseable form")
+		return
+	}
+	if r.Form.Get("type") != "identity_assertion" {
+		oauthError(w, http.StatusBadRequest, "unsupported_identity_type", "only identity_assertion is supported")
+		return
+	}
+	assertion := r.Form.Get("assertion")
+	audience := r.Form.Get("audience")
+	if assertion == "" || audience == "" {
+		oauthError(w, http.StatusBadRequest, "invalid_request", "assertion and audience are required")
+		return
+	}
+	agent, err := g.verifyAssertion(r.Context(), assertion, g.p.IdentityURL())
+	if err != nil {
+		// Uniform 401 — don't leak which check failed.
+		oauthError(w, http.StatusUnauthorized, "invalid_grant", "assertion rejected")
+		return
+	}
+	idjag, err := g.mintIDJAG(r.Context(), agent, audience)
+	if err != nil {
+		oauthError(w, http.StatusInternalServerError, "server_error", "mint failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"access_token":      idjag,
+		"issued_token_type": idJAGType,
+		"token_type":        "N_A",
+		"expires_in":        int(g.idjagTTL.Seconds()),
+	})
 }
 
 // assertionClaims is the subset of the agent's jwt-bearer assertion herald reads.

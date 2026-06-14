@@ -50,6 +50,7 @@ type Provider struct {
 	tokenEP     TokenHandler // optional; set by the agent-grant task
 	revokeEP    http.Handler // optional; POST /revoke
 	authorizeEP http.Handler // optional; GET/POST /authorize (auth-code flow)
+	identityEP  http.Handler // optional; POST /agent/identity (ID-JAG mint)
 }
 
 // TokenHandler handles POST /token. Wired by the agent-grant task; nil yields
@@ -100,6 +101,9 @@ func (p *Provider) SetRevokeHandler(h http.Handler) { p.revokeEP = h }
 // SetAuthorizeHandler wires GET/POST /authorize (the auth-code flow task).
 func (p *Provider) SetAuthorizeHandler(h http.Handler) { p.authorizeEP = h }
 
+// SetIdentityHandler wires the agent-identity endpoint (POST /agent/identity).
+func (p *Provider) SetIdentityHandler(h http.Handler) { p.identityEP = h }
+
 // Issuer returns the configured issuer URL.
 func (p *Provider) Issuer() string { return p.issuer }
 
@@ -122,6 +126,10 @@ func (p *Provider) Now() time.Time { return p.now() }
 // iss/iat/exp (caller-supplied iss/iat/exp are overwritten). Returns the
 // compact JWS string.
 func (p *Provider) SignToken(claims map[string]any) (string, error) {
+	return p.signClaims(claims, p.ttl)
+}
+
+func (p *Provider) signClaims(claims map[string]any, ttl time.Duration) (string, error) {
 	now := p.now()
 	out := make(map[string]any, len(claims)+3)
 	for k, v := range claims {
@@ -129,7 +137,7 @@ func (p *Provider) SignToken(claims map[string]any) (string, error) {
 	}
 	out["iss"] = p.issuer
 	out["iat"] = now.Unix()
-	out["exp"] = now.Add(p.ttl).Unix()
+	out["exp"] = now.Add(ttl).Unix()
 
 	payload, err := json.Marshal(out)
 	if err != nil {
@@ -182,8 +190,10 @@ func (p *Provider) PublicJWKS() jose.JSONWebKeySet {
 func (p *Provider) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /.well-known/openid-configuration", p.handleDiscovery)
+	mux.HandleFunc("GET /.well-known/oauth-authorization-server", p.handleDiscovery)
 	mux.HandleFunc("GET /jwks", p.handleJWKS)
 	mux.HandleFunc("POST /token", p.handleToken)
+	mux.HandleFunc("POST /agent/identity", p.handleIdentity)
 	mux.HandleFunc("POST /revoke", p.handleRevoke)
 	mux.HandleFunc("/authorize", func(w http.ResponseWriter, r *http.Request) {
 		if p.authorizeEP == nil {
@@ -213,6 +223,14 @@ func (p *Provider) handleDiscovery(w http.ResponseWriter, _ *http.Request) {
 		"response_types_supported":              []string{"code"},
 		"code_challenge_methods_supported":      []string{"S256"},
 		"subject_types_supported":               []string{"public"},
+		"agent_auth": map[string]any{
+			"identity_endpoint":        base + "/agent/identity",
+			"events_endpoint":          base + "/agent/events",
+			"identity_types_supported": []string{"identity_assertion"},
+			"identity_assertion": map[string]any{
+				"assertion_types_supported": []string{idJAGType},
+			},
+		},
 	})
 }
 
@@ -222,6 +240,14 @@ func (p *Provider) handleToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p.tokenEP.ServeToken(w, r)
+}
+
+func (p *Provider) handleIdentity(w http.ResponseWriter, r *http.Request) {
+	if p.identityEP == nil {
+		http.Error(w, `{"error":"identity endpoint not configured"}`, http.StatusNotImplemented)
+		return
+	}
+	p.identityEP.ServeHTTP(w, r)
 }
 
 func (p *Provider) handleRevoke(w http.ResponseWriter, r *http.Request) {

@@ -62,6 +62,10 @@ type Config struct {
 	// JWKSRefresh bounds how long a cached JWKS is reused before a refetch on
 	// the next unknown-kid. Defaults to 1h.
 	JWKSRefresh time.Duration
+	// Audience, if set, is this service's own identifier; Verify then
+	// requires the token's `aud` claim to include it. Leave empty to accept
+	// any audience (backward compatible — pre-ID-JAG tokens carry no aud).
+	Audience string
 	// now is injectable for tests.
 	now func() time.Time
 }
@@ -69,6 +73,7 @@ type Config struct {
 // Verifier verifies herald tokens locally against a cached JWKS.
 type Verifier struct {
 	issuer     string
+	audience   string
 	jwksURI    string
 	http       *http.Client
 	refresh    time.Duration
@@ -77,6 +82,9 @@ type Verifier struct {
 	mu        sync.RWMutex
 	keys      jose.JSONWebKeySet
 	fetchedAt time.Time
+
+	seenMu sync.Mutex
+	seen   map[string]int64 // jti -> exp unix; replay guard
 }
 
 // New constructs a Verifier, fetching discovery once to locate the JWKS, then
@@ -97,7 +105,7 @@ func New(ctx context.Context, cfg Config) (*Verifier, error) {
 	if nowFn == nil {
 		nowFn = time.Now
 	}
-	v := &Verifier{issuer: cfg.Issuer, http: hc, refresh: refresh, now: nowFn}
+	v := &Verifier{issuer: cfg.Issuer, audience: cfg.Audience, http: hc, refresh: refresh, now: nowFn, seen: make(map[string]int64)}
 
 	if cfg.JWKSURL != "" {
 		v.jwksURI = cfg.JWKSURL
@@ -143,6 +151,12 @@ func (v *Verifier) Verify(ctx context.Context, token string) (Identity, error) {
 	}
 	if c.Expiry == 0 || v.now().After(time.Unix(c.Expiry, 0)) {
 		return Identity{}, errors.New("heraldauth: token expired")
+	}
+	if v.audience != "" && !audienceContains(c.Audience, v.audience) {
+		return Identity{}, fmt.Errorf("heraldauth: audience %v does not include %q", c.Audience, v.audience)
+	}
+	if c.JTI != "" && !v.markJTI(c.JTI, c.Expiry) {
+		return Identity{}, errors.New("heraldauth: token replayed (jti seen)")
 	}
 
 	id := Identity{
@@ -227,4 +241,61 @@ type tokenClaims struct {
 	Act     *struct {
 		Subject string `json:"sub"`
 	} `json:"act"`
+	Audience any    `json:"aud"`
+	JTI      string `json:"jti"`
+}
+
+// audienceContains reports whether a JWT aud claim (string or []string)
+// includes want.
+func audienceContains(aud any, want string) bool {
+	switch a := aud.(type) {
+	case string:
+		return a == want
+	case []any:
+		for _, v := range a {
+			if s, _ := v.(string); s == want {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// markJTI records a token's jti, returning false if it was already seen
+// (replay). Expired entries are evicted on each call so the map stays bounded
+// by the count of currently-live tokens.
+func (v *Verifier) markJTI(jti string, exp int64) bool {
+	v.seenMu.Lock()
+	defer v.seenMu.Unlock()
+	nowUnix := v.now().Unix()
+	for j, e := range v.seen {
+		if e < nowUnix {
+			delete(v.seen, j)
+		}
+	}
+	if _, dup := v.seen[jti]; dup {
+		return false
+	}
+	v.seen[jti] = exp
+	return true
+}
+
+// ProtectedResourceMetadata returns the RFC 9728 oauth-protected-resource
+// document a CWB service publishes so that an agent which receives a 401 can
+// discover herald as the authorization server. `resource` is the service's
+// own audience identifier; `authServer` is herald's issuer URL.
+func ProtectedResourceMetadata(resource, authServer string) map[string]any {
+	return map[string]any{
+		"resource":              resource,
+		"authorization_servers": []string{authServer},
+	}
+}
+
+// ProtectedResourceHandler serves ProtectedResourceMetadata as JSON. Mount it
+// at /.well-known/oauth-protected-resource on the CWB service.
+func ProtectedResourceHandler(resource, authServer string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(ProtectedResourceMetadata(resource, authServer))
+	})
 }
