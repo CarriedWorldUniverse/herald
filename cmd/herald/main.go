@@ -99,21 +99,7 @@ func main() {
 
 	api := adminapi.New(idsvc, provider)
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status":"ok","service":"herald"}`))
-	})
-	// OIDC endpoints: discovery, JWKS, authorize, token, revoke.
-	mux.Handle("/.well-known/", provider.Handler())
-	mux.Handle("/jwks", provider.Handler())
-	mux.Handle("/authorize", provider.Handler())
-	mux.Handle("/token", provider.Handler())
-	mux.Handle("/revoke", provider.Handler())
-	// Token-authed provisioning (self-provision, validate) + the in-cluster
-	// by-fingerprint lookup. The org/human/product admin surface lives in the
-	// gRPC AdminService below (identity-derived authz, no static admin token).
-	mux.Handle("/api/", api.Handler())
+	mux := newHTTPMux(provider.Handler(), api.Handler())
 
 	// Genesis (Phase 4): idempotently provision the admin (administration) org +
 	// platform-admin owner from a deploy secret — no shipped default account or
@@ -226,6 +212,32 @@ func kubernetesConfig() (*rest.Config, error) {
 		return clientcmd.BuildConfigFromFlags("", kubeconfig)
 	}
 	return rest.InClusterConfig()
+}
+
+// newHTTPMux builds herald's public HTTP router. The OIDC core + the auth.md
+// agent-identity endpoint are served by providerHandler; the token-authed
+// provisioning surface by apiHandler. Each provider route MUST be mounted here
+// explicitly — the outer mux 404s anything it doesn't forward, so a new route
+// inside provider.Handler() is unreachable until it is added to this list.
+func newHTTPMux(providerHandler, apiHandler http.Handler) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok","service":"herald"}`))
+	})
+	// OIDC endpoints: discovery, JWKS, authorize, token, revoke.
+	mux.Handle("/.well-known/", providerHandler)
+	mux.Handle("/jwks", providerHandler)
+	mux.Handle("/authorize", providerHandler)
+	mux.Handle("/token", providerHandler)
+	mux.Handle("/revoke", providerHandler)
+	// auth.md agent-identity endpoint: ID-JAG mint (POST /agent/identity).
+	mux.Handle("/agent/identity", providerHandler)
+	// Token-authed provisioning (self-provision, validate) + the in-cluster
+	// by-fingerprint lookup. The org/human/product admin surface lives in the
+	// gRPC AdminService (identity-derived authz, no static admin token).
+	mux.Handle("/api/", apiHandler)
+	return mux
 }
 
 func env(key, def string) string {
