@@ -25,6 +25,7 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/CarriedWorldUniverse/herald/internal/identity"
 	"github.com/CarriedWorldUniverse/herald/internal/store"
 )
 
@@ -171,8 +172,17 @@ func (a *API) createAgent(w http.ResponseWriter, ctx context.Context, orgID, res
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	for _, sc := range body.Scopes {
+	expanded, err := identity.ExpandScopes(body.Scopes)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	for _, sc := range expanded {
 		if err := a.id.GrantScope(ctx, agent.ID, sc, responsibleHuman); err != nil {
+			if errors.Is(err, identity.ErrControlPlaneScopeForTenant) {
+				writeErr(w, http.StatusForbidden, err.Error())
+				return
+			}
 			writeErr(w, http.StatusInternalServerError, "scope grant failed")
 			return
 		}

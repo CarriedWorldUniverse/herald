@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	heraldv1 "github.com/CarriedWorldUniverse/cwb-proto/gen/go/cwb/herald/v1"
+	"github.com/CarriedWorldUniverse/herald/internal/identity"
 	"github.com/CarriedWorldUniverse/herald/internal/store"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -48,6 +49,9 @@ type Identity interface {
 	DisableProduct(ctx context.Context, orgID, product string) error
 	ListOrgs(ctx context.Context) ([]store.Org, error)
 	DeleteOrg(ctx context.Context, id string) error
+	// SetAdminOrg publishes which org is the control plane, so the tenant
+	// invariant (no control-plane scope for non-admin orgs) can be enforced.
+	SetAdminOrg(orgID string)
 }
 
 // TokenSigner signs herald tokens (the DeleteOrg fan-out mints a purge token).
@@ -61,9 +65,11 @@ type OrgPurger interface {
 }
 
 // Admin scopes (identity-derived authority; replace the static admin token).
+// The scope strings are owned by the identity domain layer — alias them so the
+// values cannot drift between the authz checks here and the role vocabulary.
 const (
-	ScopePlatformAdmin = "herald:platform-admin"
-	ScopeOrgAdmin      = "herald:org-admin"
+	ScopePlatformAdmin = identity.ScopePlatformAdmin
+	ScopeOrgAdmin      = identity.ScopeOrgAdmin
 )
 
 // caller is the verified identity from interchange-injected cwb-* metadata.
