@@ -87,6 +87,35 @@ func TestExpandScopes(t *testing.T) {
 	}
 }
 
+// TestCroftBundle_OrgScopedSelfProvisioning locks the contract the per-tenant
+// croft pod depends on (PLAN-m2-croft-per-tenant): the croft can self-provision
+// (agent:create) and do org work (repo/knowledge write), but holds NO admin of
+// the org (no human mgmt) and NEVER a control-plane scope. A future bundle edit
+// that widens or narrows this fails here.
+func TestCroftBundle_OrgScopedSelfProvisioning(t *testing.T) {
+	scopes, ok := identity.ScopesForRole(identity.RoleCroft)
+	if !ok {
+		t.Fatal("croft role missing")
+	}
+	must := map[string]bool{"agent:create": false, "repo:write": false, "knowledge:write": false}
+	for _, s := range scopes {
+		if _, want := must[s]; want {
+			must[s] = true
+		}
+		if s == identity.ScopeOrgAdmin {
+			t.Fatalf("croft must NOT hold org-admin (no human mgmt): %v", scopes)
+		}
+		if identity.IsControlPlaneScope(s) {
+			t.Fatalf("croft must never hold a control-plane scope: %q", s)
+		}
+	}
+	for s, got := range must {
+		if !got {
+			t.Fatalf("croft bundle missing required scope %q: %v", s, scopes)
+		}
+	}
+}
+
 func hasScope(scopes []string, want string) bool {
 	for _, s := range scopes {
 		if s == want {
