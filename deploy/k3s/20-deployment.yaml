@@ -19,7 +19,7 @@ spec:
     spec:
       containers:
         - name: herald
-          image: ghcr.io/carriedworlduniverse/herald:sha-ece8dbe@sha256:eb6c13a68a77610466de46a2cf9682c405e890cf9d7164a991239cd9de53fd48
+          image: ghcr.io/carriedworlduniverse/herald:sha-2a9b631@sha256:5d8559006f68382b9c33f8724620e92523d7c18572dec8b703ac755bf25c391c
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
